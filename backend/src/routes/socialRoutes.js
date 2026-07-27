@@ -1,0 +1,10 @@
+import express from "express";
+import { protect, allowRoles } from "../middleware/auth.js";
+import { submit, todaySubmissions, pending, review } from "../controllers/socialController.js";
+const router = express.Router();
+router.use(protect);
+router.post("/", submit);
+router.get("/today", todaySubmissions);
+router.get("/pending", allowRoles("Team Lead","Dept Head","HR","Founder","Super Admin"), pending);
+router.patch("/:id/review", allowRoles("Team Lead","Dept Head","HR","Founder","Super Admin"), review);
+export default router;

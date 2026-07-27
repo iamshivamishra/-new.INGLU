@@ -1,0 +1,11 @@
+import express from "express";
+import { protect } from "../middleware/auth.js";
+import { listLeads, getLead, createLead, assignLead, logActivity } from "../controllers/leadController.js";
+const router = express.Router();
+router.use(protect);
+router.get("/", listLeads);
+router.get("/:id", getLead);
+router.post("/", createLead);
+router.post("/:id/assign", assignLead);
+router.post("/:id/activity", logActivity);
+export default router;

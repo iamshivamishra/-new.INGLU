@@ -1,0 +1,10 @@
+import express from "express";
+import { protect, allowRoles } from "../middleware/auth.js";
+import { listAssets, createAsset, issueAsset, returnAsset } from "../controllers/assetController.js";
+const router = express.Router();
+router.use(protect);
+router.get("/", listAssets);
+router.post("/", allowRoles("Founder","Super Admin","HR"), createAsset);
+router.post("/:id/issue", allowRoles("Founder","Super Admin","HR"), issueAsset);
+router.post("/:id/return", allowRoles("Founder","Super Admin","HR"), returnAsset);
+export default router;

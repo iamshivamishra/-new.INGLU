@@ -1,0 +1,10 @@
+import express from "express";
+import { protect, allowRoles } from "../middleware/auth.js";
+import { listReviews, createReview, updateReview, history } from "../controllers/performanceController.js";
+const router = express.Router();
+router.use(protect);
+router.get("/", listReviews);
+router.get("/:userId/history", history);
+router.post("/", allowRoles("Founder","Super Admin","HR","Dept Head","Team Lead"), createReview);
+router.patch("/:id", allowRoles("Founder","Super Admin","HR","Dept Head","Team Lead"), updateReview);
+export default router;

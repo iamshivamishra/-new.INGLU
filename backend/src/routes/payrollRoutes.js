@@ -1,0 +1,12 @@
+import express from "express";
+import { protect, allowRoles } from "../middleware/auth.js";
+import { saveSalaryStructure, getSalaryStructure, runPayroll, finalizePayslip, myPayslips, listPayslips } from "../controllers/payrollController.js";
+const router = express.Router();
+router.use(protect);
+router.get("/payslips/mine", myPayslips);
+router.get("/payslips", allowRoles("Founder","Super Admin","HR","Finance"), listPayslips);
+router.post("/salary-structure", allowRoles("Founder","Super Admin","Finance"), saveSalaryStructure);
+router.get("/salary-structure/:userId", allowRoles("Founder","Super Admin","Finance","HR"), getSalaryStructure);
+router.post("/run", allowRoles("Founder","Super Admin","Finance"), runPayroll);
+router.post("/payslips/:id/finalize", allowRoles("Founder","Super Admin","Finance"), finalizePayslip);
+export default router;

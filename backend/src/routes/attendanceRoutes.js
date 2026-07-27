@@ -1,0 +1,11 @@
+import express from "express";
+import { protect } from "../middleware/auth.js";
+import { clockIn, clockOut, todayStatus, calendar, teamStatus } from "../controllers/attendanceController.js";
+const router = express.Router();
+router.use(protect);
+router.post("/clock-in", clockIn);
+router.post("/clock-out", clockOut);
+router.get("/today-status", todayStatus);
+router.get("/calendar", calendar);
+router.get("/team-status", teamStatus);
+export default router;

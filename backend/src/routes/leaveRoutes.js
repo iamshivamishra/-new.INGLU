@@ -1,0 +1,11 @@
+import express from "express";
+import { protect, allowRoles } from "../middleware/auth.js";
+import { applyLeave, myBalance, myLeaves, pendingApprovals, decideLeave } from "../controllers/leaveController.js";
+const router = express.Router();
+router.use(protect);
+router.post("/apply", applyLeave);
+router.get("/balance", myBalance);
+router.get("/mine", myLeaves);
+router.get("/pending", allowRoles("Team Lead","Dept Head","HR","Founder","Super Admin"), pendingApprovals);
+router.patch("/:id/decide", allowRoles("Team Lead","Dept Head","HR","Founder","Super Admin"), decideLeave);
+export default router;

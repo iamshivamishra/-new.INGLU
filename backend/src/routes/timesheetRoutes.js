@@ -1,0 +1,11 @@
+import express from "express";
+import { protect, allowRoles } from "../middleware/auth.js";
+import { upsertTimesheet, submitTimesheet, reopenTimesheet, myTimesheet, teamTimesheetStatus } from "../controllers/timesheetController.js";
+const router = express.Router();
+router.use(protect);
+router.get("/mine", myTimesheet);
+router.post("/", upsertTimesheet);
+router.post("/:id/submit", submitTimesheet);
+router.post("/:id/reopen", allowRoles("Team Lead","Dept Head","HR","Super Admin"), reopenTimesheet);
+router.get("/team-status", teamTimesheetStatus);
+export default router;

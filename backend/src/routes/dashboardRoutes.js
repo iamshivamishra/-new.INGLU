@@ -1,0 +1,10 @@
+import express from "express";
+import { protect } from "../middleware/auth.js";
+import { founderSummary, hrSummary, managerSummary, selfSummary } from "../controllers/dashboardController.js";
+const router = express.Router();
+router.use(protect);
+router.get("/founder-summary", founderSummary);
+router.get("/hr-summary", hrSummary);
+router.get("/manager-summary", managerSummary);
+router.get("/self-summary", selfSummary);
+export default router;

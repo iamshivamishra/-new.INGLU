@@ -1,0 +1,22 @@
+import Task from "../models/Task.js";
+import { crudFactory } from "../utils/crudFactory.js";
+
+const base = crudFactory(Task, { populate: ["assignee", "createdBy"] });
+export const listTasks = base.list;
+export const getTask = base.getOne;
+export const createTask = base.create;
+export const removeTask = base.remove;
+
+export async function updateTaskStatus(req, res) {
+  const task = await Task.findByIdAndUpdate(req.params.id, { status: req.body.status }, { new: true });
+  if (!task) return res.status(404).json({ message: "Not found" });
+  res.json(task);
+}
+
+export async function addComment(req, res) {
+  const task = await Task.findById(req.params.id);
+  if (!task) return res.status(404).json({ message: "Not found" });
+  task.comments.push({ author: req.user._id, text: req.body.text });
+  await task.save();
+  res.json(task);
+}
