@@ -2,6 +2,7 @@ import User from "../models/User.js";
 import Otp from "../models/Otp.js";
 import { generateToken } from "../utils/generateToken.js";
 import { generateEmployeeId } from "../utils/idGenerator.js";
+import { sendOtpEmail } from "../utils/mailer.js";
 
 const MAX_ATTEMPTS = 5;
 const LOCK_TIME_MS = 15 * 60 * 1000;
@@ -142,12 +143,17 @@ export async function sendOtp(req, res) {
     expiresAt: new Date(Date.now() + OTP_TTL_MS),
   });
 
-  console.log(`[OTP] Login code for ${user.email} (${user.employeeId}): ${code}`);
+  const emailSent = await sendOtpEmail({ to: user.email, code, purpose: "login" });
+
+  if (!emailSent) {
+    // SMTP not configured — log it so the flow is still testable locally.
+    console.log(`[OTP] Login code for ${user.email} (${user.employeeId}): ${code}`);
+  }
 
   res.json({
-    message: "OTP sent",
-    // Dev-mode only: exposes the code so the flow works without an SMS/email provider configured.
-    devCode: process.env.NODE_ENV === "production" ? undefined : code,
+    message: emailSent ? "OTP sent to your email" : "OTP generated (email not configured, check server logs)",
+    // Only exposed when SMTP isn't set up, so local/dev testing still works without a mail provider.
+    devCode: emailSent ? undefined : code,
   });
 }
 
@@ -198,11 +204,16 @@ export async function forgotPassword(req, res) {
     expiresAt: new Date(Date.now() + OTP_TTL_MS),
   });
 
-  console.log(`[RESET] Password reset code for ${user.email}: ${code}`);
+  const emailSent = await sendOtpEmail({ to: user.email, code, purpose: "reset" });
+
+  if (!emailSent) {
+    console.log(`[RESET] Password reset code for ${user.email}: ${code}`);
+  }
 
   res.json({
     message: "If that email exists, a reset code has been sent.",
-    devCode: process.env.NODE_ENV === "production" ? undefined : code,
+    // Only exposed when SMTP isn't set up, so local/dev testing still works without a mail provider.
+    devCode: emailSent ? undefined : code,
   });
 }
 
