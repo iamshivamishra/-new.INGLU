@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import {
   Home, ListChecks, Clock, FileText, Send, CalendarDays, Users, UserPlus,
   ClipboardList, Fingerprint, TrendingUp, Wallet, Briefcase, Target,
@@ -7,6 +7,7 @@ import {
   Check, XCircle, MessageSquare, Paperclip, Upload, Download, Filter,
   ArrowLeft, Sparkles, LogOut, Menu, MoreHorizontal, AlertTriangle,
   Circle, CheckCircle2, Star, Link2, MapPin, Cake, ShieldCheck,
+  Camera, Trash2, UserX, UserCheck,
 } from "lucide-react";
 import api from "./api/client.js";
 
@@ -560,7 +561,7 @@ function SignupScreen({ goto, onLogin }) {
   );
 }
 
-function FirstTimeScreen({ onDone }) {
+function FirstTimeScreen({ onDone, currentUser }) {
   const [step, setStep] = useState(1);
   return (
     <AuthShell>
@@ -568,7 +569,7 @@ function FirstTimeScreen({ onDone }) {
         <div className="flex gap-1.5 mb-4">
           {[1,2,3].map(s=><div key={s} className={`h-1 flex-1 rounded-full ${s<=step?"bg-lime-300":"bg-zinc-800"}`}/>)}
         </div>
-        <h3 className="f-display text-zinc-100 mb-4">Welcome to INGLU, Riya! ({step}/3)</h3>
+        <h3 className="f-display text-zinc-100 mb-4">Welcome to INGLU, {(currentUser?.name || "").split(" ")[0] || "there"}! ({step}/3)</h3>
         {step===1 && <>
           <Field label="New password"><input type="password" className={inputCls}/></Field>
           <Field label="Confirm password"><input type="password" className={inputCls}/></Field>
@@ -595,7 +596,7 @@ function FirstTimeScreen({ onDone }) {
 
 /* ============================== APP SHELL ============================== */
 
-function Sidebar({ active, setActive, role, collapsed, setCollapsed }) {
+function Sidebar({ active, setActive, role, collapsed, setCollapsed, currentUser }) {
   const visible = NAV.filter(n => !n.roles || n.roles.includes(role));
   const grouped = GROUP_ORDER.map(g => ({ g, items: visible.filter(n=>n.group===g) }));
   const top = visible.filter(n=>!n.group && n.id==="dashboard");
@@ -623,10 +624,10 @@ function Sidebar({ active, setActive, role, collapsed, setCollapsed }) {
         </div>
       </div>
       <div className="border-t border-zinc-800 p-3 flex items-center gap-2">
-        <Avatar name={role==="Intern"?"Riya Sharma":"Nandini Kapoor"} size={30}/>
+        <Avatar name={currentUser?.name || "User"} size={30}/>
         {!collapsed && <div className="min-w-0">
-          <div className="text-sm text-zinc-200 truncate">{role==="Intern"?"Riya Sharma":"Nandini Kapoor"}</div>
-          <div className="text-[11px] text-zinc-500 truncate">{role}</div>
+          <div className="text-sm text-zinc-200 truncate">{currentUser?.name || "User"}</div>
+          <div className="text-[11px] text-zinc-500 truncate">{currentUser?.designation || role}</div>
         </div>}
       </div>
     </div>
@@ -691,10 +692,11 @@ function Topbar({ role, setRole, onLogout, screenLabel }) {
 
 /* ============================== DASHBOARDS ============================== */
 
-function DashboardFounder() {
+function DashboardFounder({ currentUser }) {
+  const first = (currentUser?.name || "").split(" ")[0] || "there";
   return (
     <div>
-      <SectionHeader title="Good morning, Aditi" />
+      <SectionHeader title={`Good morning, ${first}`} />
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
         <StatCard label="Headcount" value="142" sub="+6 this month" tone="lime"/>
         <StatCard label="Attendance Today" value="91%" tone="violet"/>
@@ -784,10 +786,11 @@ function DashboardManager({ role }) {
   );
 }
 
-function DashboardSelf({ role }) {
+function DashboardSelf({ role, currentUser }) {
+  const first = (currentUser?.name || "").split(" ")[0] || "there";
   return (
     <div>
-      <SectionHeader title={role==="Intern" ? "Hi Riya!" : "Hi there!"} />
+      <SectionHeader title={`Hi ${first}!`} />
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
         <Card className="p-4"><div className="text-zinc-500 text-xs mb-2">My Attendance</div><Btn size="sm">Clock In</Btn></Card>
         <StatCard label="Leave Balance" value="12 days" tone="lime"/>
@@ -807,11 +810,11 @@ function DashboardSelf({ role }) {
   );
 }
 
-function Dashboard({ role }) {
-  if (role==="Founder") return <DashboardFounder/>;
+function Dashboard({ role, currentUser }) {
+  if (role==="Founder") return <DashboardFounder currentUser={currentUser}/>;
   if (role==="HR" || role==="Super Admin") return <DashboardHR/>;
   if (role==="Dept Head" || role==="Team Lead") return <DashboardManager role={role}/>;
-  return <DashboardSelf role={role}/>;
+  return <DashboardSelf role={role} currentUser={currentUser}/>;
 }
 
 /* ============================== MY WORK MODULES ============================== */
@@ -895,30 +898,419 @@ function TimesheetScreen() {
   );
 }
 
-function DailyReportScreen() {
+/* ============================== DAILY WORK REPORT ============================== */
+/* Fully wired to the backend (/api/daily-reports). Employee/Intern submits a
+   report for today which locks once a manager reviews it; Team Lead/Dept
+   Head/HR/Founder/Super Admin get a team status queue with review + nudge. */
+
+const MANAGER_ROLES = ["Founder","Super Admin","HR","Dept Head","Team Lead"];
+
+function todayISO() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function fmtTime(d) {
+  if (!d) return "—";
+  return new Date(d).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
+}
+
+function DailyReportSubmit({ currentUser }) {
+  const [myTasks, setMyTasks] = useState([]);
+  const [existing, setExisting] = useState(null); // today's report if already submitted
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  const [summary, setSummary] = useState("");
+  const [tomorrowPlan, setTomorrowPlan] = useState("");
+  const [challenges, setChallenges] = useState("");
+  const [completedIds, setCompletedIds] = useState(new Set());
+  const [pendingIds, setPendingIds] = useState(new Set());
+  const [attachments, setAttachments] = useState([]);
+
+  const locked = !!existing?.reviewed;
+  const now = new Date();
+  const pastDeadline = now.getHours() >= 18;
+
+  async function loadAll() {
+    setLoading(true);
+    setError("");
+    try {
+      const [tasksRes, reportRes] = await Promise.all([
+        api.get("/tasks", { params: { assignee: currentUser?._id } }),
+        api.get("/daily-reports/mine/today"),
+      ]);
+      setMyTasks(tasksRes.data || []);
+      const r = reportRes.data;
+      if (r) {
+        setExisting(r);
+        setSummary(r.summary || "");
+        setTomorrowPlan(r.tomorrowPlan || "");
+        setChallenges(r.challenges || "");
+        setCompletedIds(new Set((r.completedTasks || []).map((t) => t._id || t)));
+        setPendingIds(new Set((r.pendingTasks || []).map((t) => t._id || t)));
+        setAttachments(r.attachments || []);
+      }
+    } catch (err) {
+      setError(err?.response?.data?.message || "Could not load today's report.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { loadAll(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
+
+  function toggle(setFn, id) {
+    setFn((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }
+
+  async function handleFile(e) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setUploading(true);
+    setError("");
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const { data } = await api.post("/daily-reports/upload", fd, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      setAttachments((prev) => [...prev, data]);
+    } catch (err) {
+      setError(err?.response?.data?.message || "File upload failed.");
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  function removeAttachment(i) {
+    setAttachments((prev) => prev.filter((_, idx) => idx !== i));
+  }
+
+  async function submit() {
+    setSaving(true);
+    setError("");
+    setNotice("");
+    try {
+      const payload = {
+        date: todayISO(),
+        summary,
+        tomorrowPlan,
+        challenges,
+        completedTasks: [...completedIds],
+        pendingTasks: [...pendingIds],
+        attachments,
+      };
+      const { data } = await api.post("/daily-reports", payload);
+      setExisting(data);
+      setNotice(pastDeadline ? "Report submitted (flagged as late — after the 6:00 PM deadline)." : "Report submitted.");
+    } catch (err) {
+      setError(err?.response?.data?.message || "Could not submit report.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (loading) return <Card className="p-6 text-sm text-zinc-500">Loading today's report…</Card>;
+
+  return (
+    <Card className="p-4 max-w-xl">
+      {existing && (
+        <div className={`flex items-center gap-2 text-sm mb-4 px-3 py-2 rounded-lg border ${locked ? "border-violet-400/30 bg-violet-400/5 text-violet-300" : "border-lime-300/30 bg-lime-300/5 text-lime-300"}`}>
+          <CheckCircle2 size={15}/>
+          {locked
+            ? `Reviewed by your manager at ${fmtTime(existing.reviewedAt)} — this report is now locked.`
+            : `Submitted today at ${fmtTime(existing.submittedAt)}${existing.late ? " (flagged late)" : ""}. You can still edit until it's reviewed.`}
+        </div>
+      )}
+      {!existing && pastDeadline && (
+        <div className="flex items-center gap-2 text-sm mb-4 px-3 py-2 rounded-lg border border-amber-500/30 bg-amber-500/5 text-amber-300">
+          <AlertTriangle size={15}/> It's past 6:00 PM — a reminder has gone out. Please submit today's report.
+        </div>
+      )}
+      {error && <div className="flex items-center gap-2 text-sm mb-4 px-3 py-2 rounded-lg border border-rose-500/30 bg-rose-500/5 text-rose-300"><XCircle size={15}/>{error}</div>}
+      {notice && <div className="flex items-center gap-2 text-sm mb-4 px-3 py-2 rounded-lg border border-lime-300/30 bg-lime-300/5 text-lime-300"><CheckCircle2 size={15}/>{notice}</div>}
+
+      <Field label="Today's Work Summary">
+        <textarea className={inputCls} rows={3} value={summary} disabled={locked} onChange={(e)=>setSummary(e.target.value)} placeholder="What did you work on today?"/>
+      </Field>
+
+      <Field label="Completed Tasks">
+        <TaskPicker tasks={myTasks} selected={completedIds} onToggle={(id)=>toggle(setCompletedIds, id)} disabled={locked} empty="No tasks assigned to you yet."/>
+      </Field>
+
+      <Field label="Pending Tasks">
+        <TaskPicker tasks={myTasks} selected={pendingIds} onToggle={(id)=>toggle(setPendingIds, id)} disabled={locked} empty="No tasks assigned to you yet."/>
+      </Field>
+
+      <Field label="Tomorrow's Plan">
+        <textarea className={inputCls} rows={2} value={tomorrowPlan} disabled={locked} onChange={(e)=>setTomorrowPlan(e.target.value)} placeholder="What's next?"/>
+      </Field>
+
+      <Field label="Challenges Faced">
+        <textarea className={inputCls} rows={2} value={challenges} disabled={locked} onChange={(e)=>setChallenges(e.target.value)} placeholder="Anything blocking you? (optional)"/>
+      </Field>
+
+      <Field label="Attachments">
+        <div className="flex flex-col gap-1.5 mb-2">
+          {attachments.map((a, i) => (
+            <div key={i} className="flex items-center gap-2 text-sm text-zinc-300 bg-zinc-950 border border-zinc-800 rounded-lg px-2.5 py-1.5">
+              <Paperclip size={13} className="text-zinc-500 shrink-0"/>
+              <a href={a.url} target="_blank" rel="noreferrer" className="truncate hover:text-lime-300">{a.name}</a>
+              {!locked && <button onClick={()=>removeAttachment(i)} className="ml-auto text-zinc-600 hover:text-rose-400"><Trash2 size={13}/></button>}
+            </div>
+          ))}
+        </div>
+        {!locked && (
+          <label className="inline-flex">
+            <input type="file" className="hidden" onChange={handleFile} disabled={uploading}/>
+            <span className={`inline-flex items-center gap-1.5 rounded-lg font-medium transition-colors bg-zinc-800 text-zinc-200 hover:bg-zinc-700 border border-zinc-700 px-3.5 py-2 text-sm cursor-pointer ${uploading?"opacity-50 pointer-events-none":""}`}>
+              <Upload size={14}/> {uploading ? "Uploading…" : "Attach file"}
+            </span>
+          </label>
+        )}
+      </Field>
+
+      <Btn className="w-full justify-center" onClick={submit} disabled={saving || locked}>
+        {saving ? "Submitting…" : existing ? "Update Report" : "Submit Report"}
+      </Btn>
+      <p className="text-[11px] text-zinc-600 mt-2">A reminder email fires automatically at 6:00 PM if today's report hasn't been submitted yet.</p>
+    </Card>
+  );
+}
+
+function TaskPicker({ tasks, selected, onToggle, disabled, empty }) {
+  const [open, setOpen] = useState(false);
+  if (!tasks.length) return <div className={inputCls + " text-zinc-600"}>{empty}</div>;
+  const selectedTasks = tasks.filter((t) => selected.has(t._id));
+  return (
+    <div className="relative">
+      <button type="button" disabled={disabled} onClick={()=>setOpen((o)=>!o)}
+        className={`${inputCls} text-left flex items-center justify-between ${disabled?"opacity-60 cursor-not-allowed":"cursor-pointer"}`}>
+        <span className="truncate">
+          {selectedTasks.length ? selectedTasks.map((t)=>t.title).join(", ") : "+ pick from Task list"}
+        </span>
+        <ChevronDown size={14} className="text-zinc-500 shrink-0"/>
+      </button>
+      {open && !disabled && (
+        <div className="absolute z-20 mt-1 w-full bg-zinc-900 border border-zinc-700 rounded-lg shadow-xl max-h-48 overflow-y-auto scrollbar-thin">
+          {tasks.map((t) => (
+            <label key={t._id} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-800 cursor-pointer">
+              <input type="checkbox" className="accent-lime-300" checked={selected.has(t._id)} onChange={()=>onToggle(t._id)}/>
+              <span className="truncate">{t.title}</span>
+              <Badge tone={t.status==="Done"?"lime":"zinc"}>{t.status}</Badge>
+            </label>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DailyReportReviewModal({ row, date, onClose, onReviewed }) {
+  const [report, setReport] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [comments, setComments] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const { data } = await api.get("/daily-reports", { params: { userId: row.userId, date } });
+        const r = data?.[0] || null;
+        setReport(r);
+        setComments(r?.managerComments || "");
+      } catch (err) {
+        setError(err?.response?.data?.message || "Could not load report.");
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, [row.userId, date]);
+
+  async function markReviewed() {
+    if (!report) return;
+    setSaving(true);
+    setError("");
+    try {
+      await api.post(`/daily-reports/${report._id}/review`, { managerComments: comments });
+      onReviewed();
+      onClose();
+    } catch (err) {
+      setError(err?.response?.data?.message || "Could not mark as reviewed.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Modal title={`Daily Report — ${row.name}`} onClose={onClose} wide>
+      {loading ? (
+        <div className="text-sm text-zinc-500">Loading…</div>
+      ) : !report ? (
+        <div className="text-sm text-zinc-500">No report found for this date.</div>
+      ) : (
+        <div>
+          {error && <div className="text-sm text-rose-300 mb-3">{error}</div>}
+          <div className="flex items-center gap-2 mb-3">
+            <Badge tone={report.late ? "amber" : "lime"}>{report.late ? "Late" : "On time"}</Badge>
+            <span className="text-xs text-zinc-500">Submitted {fmtTime(report.submittedAt)}</span>
+            {report.reviewed && <Badge tone="violet">Reviewed by {report.reviewedBy?.name || "manager"}</Badge>}
+          </div>
+          <div className="mb-3">
+            <div className="text-xs text-zinc-500 mb-1">Today's Work Summary</div>
+            <div className="text-sm text-zinc-200 whitespace-pre-wrap">{report.summary || "—"}</div>
+          </div>
+          <div className="grid grid-cols-2 gap-3 mb-3">
+            <div>
+              <div className="text-xs text-zinc-500 mb-1">Completed Tasks</div>
+              {report.completedTasks?.length ? report.completedTasks.map((t)=>(
+                <div key={t._id} className="text-sm text-zinc-300">• {t.title}</div>
+              )) : <div className="text-sm text-zinc-600">—</div>}
+            </div>
+            <div>
+              <div className="text-xs text-zinc-500 mb-1">Pending Tasks</div>
+              {report.pendingTasks?.length ? report.pendingTasks.map((t)=>(
+                <div key={t._id} className="text-sm text-zinc-300">• {t.title}</div>
+              )) : <div className="text-sm text-zinc-600">—</div>}
+            </div>
+          </div>
+          <div className="mb-3">
+            <div className="text-xs text-zinc-500 mb-1">Tomorrow's Plan</div>
+            <div className="text-sm text-zinc-200 whitespace-pre-wrap">{report.tomorrowPlan || "—"}</div>
+          </div>
+          <div className="mb-3">
+            <div className="text-xs text-zinc-500 mb-1">Challenges Faced</div>
+            <div className="text-sm text-zinc-200 whitespace-pre-wrap">{report.challenges || "—"}</div>
+          </div>
+          {!!report.attachments?.length && (
+            <div className="mb-3">
+              <div className="text-xs text-zinc-500 mb-1">Attachments</div>
+              <div className="flex flex-col gap-1.5">
+                {report.attachments.map((a, i) => (
+                  <a key={i} href={a.url} target="_blank" rel="noreferrer" className="flex items-center gap-2 text-sm text-lime-300 hover:underline">
+                    <Paperclip size={13}/> {a.name}
+                  </a>
+                ))}
+              </div>
+            </div>
+          )}
+          <Field label="Manager Comments">
+            <textarea className={inputCls} rows={2} value={comments} disabled={report.reviewed} onChange={(e)=>setComments(e.target.value)} placeholder="Optional feedback for the employee"/>
+          </Field>
+          {!report.reviewed && (
+            <Btn className="w-full justify-center" onClick={markReviewed} disabled={saving}>
+              {saving ? "Saving…" : "Mark Reviewed"}
+            </Btn>
+          )}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+function DailyReportManagerQueue() {
+  const [date, setDate] = useState(todayISO());
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [reviewRow, setReviewRow] = useState(null);
+  const [nudging, setNudging] = useState(null);
+
+  async function load() {
+    setLoading(true);
+    setError("");
+    try {
+      const { data } = await api.get("/daily-reports/team-status", { params: { date } });
+      setRows(data.rows || []);
+    } catch (err) {
+      setError(err?.response?.data?.message || "Could not load team report status.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [date]);
+
+  async function nudge(row) {
+    setNudging(row.userId);
+    setNotice("");
+    setError("");
+    try {
+      const { data } = await api.post(`/daily-reports/nudge/${row.userId}`, { date });
+      setNotice(data.message);
+    } catch (err) {
+      setError(err?.response?.data?.message || "Could not send reminder.");
+    } finally {
+      setNudging(null);
+    }
+  }
+
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-3">
+        <input type="date" className={inputCls + " w-auto"} value={date} max={todayISO()} onChange={(e)=>setDate(e.target.value)}/>
+        <span className="text-xs text-zinc-500">{rows.filter(r=>r.submitted).length}/{rows.length} submitted</span>
+      </div>
+      {error && <div className="text-sm text-rose-300 mb-3">{error}</div>}
+      {notice && <div className="text-sm text-lime-300 mb-3">{notice}</div>}
+      <Card className="p-2">
+        {loading ? (
+          <div className="p-4 text-sm text-zinc-500">Loading…</div>
+        ) : !rows.length ? (
+          <div className="p-4 text-sm text-zinc-500">No teammates found for your scope.</div>
+        ) : (
+          <Table columns={["Name","Department","Status","Submitted At","Action"]} rows={rows.map((r) => (
+            <tr key={r.userId}>
+              <Td>{r.name}</Td>
+              <Td>{r.department}</Td>
+              <Td>
+                {r.submitted ? (
+                  <div className="flex gap-1.5">
+                    <Badge tone={r.late ? "amber" : "lime"}>{r.late ? "Late" : "Submitted"}</Badge>
+                    {r.reviewed && <Badge tone="violet">Reviewed</Badge>}
+                  </div>
+                ) : <Badge tone="rose">Not submitted</Badge>}
+              </Td>
+              <Td>{r.submitted ? fmtTime(r.submittedAt) : "—"}</Td>
+              <Td>
+                {r.submitted ? (
+                  <Btn size="sm" variant="secondary" onClick={()=>setReviewRow(r)}>{r.reviewed ? "View" : "Review"}</Btn>
+                ) : (
+                  <Btn size="sm" variant="secondary" disabled={nudging===r.userId} onClick={()=>nudge(r)}>{nudging===r.userId ? "Sending…" : "Nudge"}</Btn>
+                )}
+              </Td>
+            </tr>
+          ))}/>
+        )}
+      </Card>
+      {reviewRow && (
+        <DailyReportReviewModal row={reviewRow} date={date} onClose={()=>setReviewRow(null)} onReviewed={load}/>
+      )}
+    </div>
+  );
+}
+
+function DailyReportScreen({ role, currentUser }) {
   const [tab, setTab] = useState("Submit");
+  const isManager = MANAGER_ROLES.includes(role);
   return (
     <div>
       <SectionHeader title="Daily Work Report" />
-      <Tabs tabs={["Submit","Manager Review Queue"]} active={tab} onChange={setTab}/>
-      {tab==="Submit" ? (
-        <Card className="p-4 max-w-xl">
-          <Field label="Today's Work Summary"><textarea className={inputCls} rows={3}/></Field>
-          <Field label="Completed Tasks"><input className={inputCls} placeholder="+ pick from Task list"/></Field>
-          <Field label="Pending Tasks"><input className={inputCls} placeholder="+ pick from Task list"/></Field>
-          <Field label="Tomorrow's Plan"><textarea className={inputCls} rows={2}/></Field>
-          <Field label="Challenges Faced"><textarea className={inputCls} rows={2}/></Field>
-          <Btn icon={Upload} variant="secondary" className="mb-3">Attach file</Btn>
-          <Btn className="w-full justify-center">Submit Report</Btn>
-          <p className="text-[11px] text-zinc-600 mt-2">A reminder fires automatically at 6:00 PM if not submitted.</p>
-        </Card>
+      {isManager && <Tabs tabs={["Submit","Manager Review Queue"]} active={tab} onChange={setTab}/>}
+      {tab==="Submit" || !isManager ? (
+        <DailyReportSubmit currentUser={currentUser}/>
       ) : (
-        <Card className="p-2">
-          <Table columns={["Name","Status","Time","Action"]} rows={[
-            <tr key="1"><Td>Karan Mehta</Td><Td><Badge tone="lime">Submitted</Badge></Td><Td>6:45 PM</Td><Td><Btn size="sm" variant="secondary">Review</Btn></Td></tr>,
-            <tr key="2"><Td>Priya Desai</Td><Td><Badge tone="rose">Not submitted</Badge></Td><Td>—</Td><Td><Btn size="sm" variant="secondary">Nudge</Btn></Td></tr>,
-          ]}/>
-        </Card>
+        <DailyReportManagerQueue/>
       )}
     </div>
   );
@@ -998,67 +1390,416 @@ function LeavesScreen({ role }) {
 }
 
 /* ============================== PEOPLE MODULES ============================== */
+/* Employee Profile module — Add / List / Details / Edit / Delete-Deactivate /
+   Search & Filter / Department & Role & Reporting Manager assign / Photo upload.
+   Fully wired to the backend (/api/employees). */
 
-function DirectoryScreen({ onOpenProfile }) {
+function statusTone(status) {
+  return { Active: "lime", Onboarding: "violet", Inactive: "amber", Exited: "rose" }[status] || "zinc";
+}
+
+function fmtDate(d) {
+  if (!d) return "—";
+  return new Date(d).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+}
+
+function DirectoryScreen({ role }) {
+  const [employees, setEmployees] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [meta, setMeta] = useState({ roles: ROLES, departments: [], managers: [], statuses: [], employmentTypes: [] });
+  const [q, setQ] = useState("");
+  const [filters, setFilters] = useState({ department: "", role: "", status: "", employmentType: "" });
+  const [showFilters, setShowFilters] = useState(false);
+  const [formModal, setFormModal] = useState(null); // { mode: "add" | "edit", employee }
+  const [profileId, setProfileId] = useState(null);
+
+  const canManage = ["Founder", "Super Admin", "HR"].includes(role);
+  const activeFilterCount = Object.values(filters).filter(Boolean).length;
+
+  async function loadMeta() {
+    try {
+      const { data } = await api.get("/employees/meta");
+      setMeta(data);
+    } catch {
+      // Non-fatal — dropdowns just fall back to defaults.
+    }
+  }
+
+  async function loadEmployees() {
+    setLoading(true);
+    setError("");
+    try {
+      const params = { q: q.trim() || undefined };
+      Object.entries(filters).forEach(([k, v]) => { if (v) params[k] = v; });
+      const { data } = await api.get("/employees", { params });
+      setEmployees(data);
+    } catch (err) {
+      setError(err?.response?.data?.message || "Could not load employees.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { loadMeta(); }, []);
+  useEffect(() => {
+    const t = setTimeout(loadEmployees, 300); // debounce search-as-you-type
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [q, filters]);
+
   return (
     <div>
-      <SectionHeader title="Employee Directory" action={<Btn size="sm" icon={Filter} variant="secondary">Filter</Btn>}/>
-      <Card className="p-2">
-        <Table columns={["Name","ID","Department","Designation","Type","Status",""]} rows={EMPLOYEES.map((e,i)=>(
-          <tr key={i} className="hover:bg-zinc-800/40 cursor-pointer" onClick={()=>onOpenProfile(e)}>
-            <Td><div className="flex items-center gap-2"><Avatar name={e.name} size={26}/>{e.name}</div></Td>
-            <Td><IdTag id={e.id}/></Td><Td>{e.dept}</Td><Td>{e.designation}</Td>
-            <Td><Badge tone={e.type==="Intern"?"violet":"zinc"}>{e.type}</Badge></Td>
-            <Td><Badge tone="lime">{e.status}</Badge></Td>
-            <Td><ChevronRight size={14} className="text-zinc-600"/></Td>
-          </tr>
-        ))}/>
+      <SectionHeader
+        title="Employee Directory"
+        action={canManage && <Btn size="sm" icon={UserPlus} onClick={() => setFormModal({ mode: "add" })}>Add Employee</Btn>}
+      />
+
+      <Card className="p-3 mb-4">
+        <div className="flex flex-wrap gap-2 items-center">
+          <div className="relative flex-1 min-w-[220px]">
+            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
+            <input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="Search name, email, employee ID, designation…"
+              className={`${inputCls} pl-8`}
+            />
+          </div>
+          <Btn size="sm" variant="secondary" icon={Filter} onClick={() => setShowFilters((s) => !s)}>
+            Filters{activeFilterCount > 0 ? ` (${activeFilterCount})` : ""}
+          </Btn>
+        </div>
+        {showFilters && (
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mt-3 pt-3 border-t border-zinc-800">
+            <select value={filters.department} onChange={(e) => setFilters((f) => ({ ...f, department: e.target.value }))} className={inputCls}>
+              <option value="">All Departments</option>
+              {meta.departments.map((d) => <option key={d} value={d}>{d}</option>)}
+            </select>
+            <select value={filters.role} onChange={(e) => setFilters((f) => ({ ...f, role: e.target.value }))} className={inputCls}>
+              <option value="">All Roles</option>
+              {meta.roles.map((r) => <option key={r} value={r}>{r}</option>)}
+            </select>
+            <select value={filters.employmentType} onChange={(e) => setFilters((f) => ({ ...f, employmentType: e.target.value }))} className={inputCls}>
+              <option value="">All Types</option>
+              {(meta.employmentTypes.length ? meta.employmentTypes : ["Full-Time", "Intern"]).map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+            <select value={filters.status} onChange={(e) => setFilters((f) => ({ ...f, status: e.target.value }))} className={inputCls}>
+              <option value="">All Statuses</option>
+              {(meta.statuses.length ? meta.statuses : ["Onboarding", "Active", "Inactive", "Exited"]).map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+        )}
       </Card>
+
+      {error && <Card className="p-3 mb-3 text-sm text-rose-300 border-rose-500/30">{error}</Card>}
+
+      <Card className="p-2">
+        {loading ? (
+          <div className="p-10 text-center text-zinc-500 text-sm">Loading employees…</div>
+        ) : employees.length === 0 ? (
+          <div className="p-10 text-center text-zinc-500 text-sm">No employees match your search / filters.</div>
+        ) : (
+          <Table columns={["Name", "ID", "Department", "Designation", "Type", "Status", ""]} rows={employees.map((e) => (
+            <tr key={e._id} className="hover:bg-zinc-800/40 cursor-pointer" onClick={() => setProfileId(e._id)}>
+              <Td>
+                <div className="flex items-center gap-2">
+                  {e.photo ? <img src={e.photo} alt="" className="w-[26px] h-[26px] rounded-full object-cover" /> : <Avatar name={e.name} size={26} />}
+                  {e.name}
+                </div>
+              </Td>
+              <Td><IdTag id={e.employeeId} /></Td>
+              <Td>{e.department}</Td>
+              <Td>{e.designation || "—"}</Td>
+              <Td><Badge tone={e.employmentType === "Intern" ? "violet" : "zinc"}>{e.employmentType}</Badge></Td>
+              <Td><Badge tone={statusTone(e.status)}>{e.status}</Badge></Td>
+              <Td><ChevronRight size={14} className="text-zinc-600" /></Td>
+            </tr>
+          ))} />
+        )}
+      </Card>
+
+      {profileId && (
+        <EmployeeProfileModal
+          id={profileId}
+          role={role}
+          onClose={() => setProfileId(null)}
+          onEdit={(emp) => { setProfileId(null); setFormModal({ mode: "edit", employee: emp }); }}
+          onChanged={loadEmployees}
+        />
+      )}
+
+      {formModal && (
+        <EmployeeFormModal
+          mode={formModal.mode}
+          employee={formModal.employee}
+          meta={meta}
+          onClose={() => setFormModal(null)}
+          onSaved={() => { setFormModal(null); loadEmployees(); loadMeta(); }}
+        />
+      )}
     </div>
   );
 }
 
-function EmployeeProfileModal({ employee, onClose }) {
-  const tabs = ["Personal","Professional","Bank","Documents","Salary","Attendance","Leaves","Performance","Assets","Projects","Training","Activity Log"];
+function EmployeeFormModal({ mode, employee, meta, onClose, onSaved }) {
+  const isEdit = mode === "edit";
+  const [form, setForm] = useState({
+    name: employee?.name || "",
+    email: employee?.email || "",
+    phone: employee?.phone || "",
+    role: employee?.role || "Employee",
+    department: employee?.department || "",
+    designation: employee?.designation || "",
+    employmentType: employee?.employmentType || "Full-Time",
+    reportingManager: employee?.reportingManager?._id || employee?.reportingManager || "",
+    status: employee?.status || "Onboarding",
+  });
+  const [photoFile, setPhotoFile] = useState(null);
+  const [photoPreview, setPhotoPreview] = useState(employee?.photo || null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  function set(k, v) { setForm((f) => ({ ...f, [k]: v })); }
+
+  function handlePhotoChange(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setPhotoFile(file);
+    setPhotoPreview(URL.createObjectURL(file));
+  }
+
+  async function handleSubmit() {
+    if (!form.name.trim() || !form.email.trim()) {
+      setError("Name and email are required.");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      const payload = { ...form, reportingManager: form.reportingManager || null };
+      let id = employee?._id;
+      if (isEdit) {
+        await api.patch(`/employees/${id}`, payload);
+      } else {
+        const { data } = await api.post("/employees", payload);
+        id = data._id;
+      }
+      if (photoFile && id) {
+        const fd = new FormData();
+        fd.append("photo", photoFile);
+        await api.post(`/employees/${id}/photo`, fd);
+      }
+      onSaved();
+    } catch (err) {
+      setError(err?.response?.data?.message || "Could not save employee.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const managerOptions = (meta.managers || []).filter((m) => m._id !== employee?._id);
+  const roleOptions = meta.roles?.length ? meta.roles : ROLES;
+  const typeOptions = meta.employmentTypes?.length ? meta.employmentTypes : ["Full-Time", "Intern"];
+  const statusOptions = meta.statuses?.length ? meta.statuses : ["Onboarding", "Active", "Inactive", "Exited"];
+
+  return (
+    <Modal title={isEdit ? "Edit Employee" : "Add Employee"} onClose={onClose} wide>
+      <div className="flex items-center gap-4 mb-4">
+        <div className="relative">
+          {photoPreview
+            ? <img src={photoPreview} alt="" className="w-16 h-16 rounded-full object-cover border border-zinc-700" />
+            : <Avatar name={form.name || "New Employee"} size={64} />}
+          <label className="absolute -bottom-1 -right-1 bg-lime-300 text-zinc-950 rounded-full p-1.5 cursor-pointer hover:bg-lime-200">
+            <Camera size={12} />
+            <input type="file" accept="image/*" className="hidden" onChange={handlePhotoChange} />
+          </label>
+        </div>
+        <div className="text-xs text-zinc-500">Upload a profile photo (JPG/PNG/WEBP, max 5MB).</div>
+      </div>
+
+      {error && <div className="mb-3 text-sm text-rose-300 bg-rose-500/10 border border-rose-500/30 rounded-lg px-3 py-2">{error}</div>}
+
+      <div className="grid grid-cols-2 gap-x-4">
+        <Field label="Full Name *"><input className={inputCls} value={form.name} onChange={(e) => set("name", e.target.value)} /></Field>
+        <Field label="Email *"><input type="email" className={inputCls} value={form.email} onChange={(e) => set("email", e.target.value)} /></Field>
+        <Field label="Phone"><input className={inputCls} value={form.phone} onChange={(e) => set("phone", e.target.value)} /></Field>
+        <Field label="Employment Type">
+          <select className={inputCls} value={form.employmentType} onChange={(e) => set("employmentType", e.target.value)}>
+            {typeOptions.map((t) => <option key={t}>{t}</option>)}
+          </select>
+        </Field>
+        <Field label="Role">
+          <select className={inputCls} value={form.role} onChange={(e) => set("role", e.target.value)}>
+            {roleOptions.map((r) => <option key={r}>{r}</option>)}
+          </select>
+        </Field>
+        <Field label="Department">
+          <input list="dept-options" className={inputCls} value={form.department} onChange={(e) => set("department", e.target.value)} placeholder="e.g. Marketing" />
+          <datalist id="dept-options">{(meta.departments || []).map((d) => <option key={d} value={d} />)}</datalist>
+        </Field>
+        <Field label="Designation"><input className={inputCls} value={form.designation} onChange={(e) => set("designation", e.target.value)} placeholder="e.g. Content Intern" /></Field>
+        <Field label="Reporting Manager">
+          <select className={inputCls} value={form.reportingManager} onChange={(e) => set("reportingManager", e.target.value)}>
+            <option value="">— None —</option>
+            {managerOptions.map((m) => <option key={m._id} value={m._id}>{m.name} ({m.employeeId})</option>)}
+          </select>
+        </Field>
+        {isEdit && (
+          <Field label="Status">
+            <select className={inputCls} value={form.status} onChange={(e) => set("status", e.target.value)}>
+              {statusOptions.map((s) => <option key={s}>{s}</option>)}
+            </select>
+          </Field>
+        )}
+      </div>
+
+      {!isEdit && (
+        <div className="text-xs text-zinc-500 mt-1 mb-2">
+          Employee ID is auto-generated (EMP/INT-YYYY-####). Temporary password: <span className="f-mono text-zinc-400">Welcome@123</span> — they'll be asked to set their own on first login.
+        </div>
+      )}
+
+      <div className="flex justify-end gap-2 mt-4">
+        <Btn variant="secondary" onClick={onClose} disabled={saving}>Cancel</Btn>
+        <Btn onClick={handleSubmit} disabled={saving}>{saving ? "Saving…" : isEdit ? "Save Changes" : "Add Employee"}</Btn>
+      </div>
+    </Modal>
+  );
+}
+
+function EmployeeProfileModal({ id, role, onClose, onEdit, onChanged }) {
+  const tabs = ["Personal", "Professional", "Bank", "Documents", "Salary", "Attendance", "Leaves", "Performance", "Assets", "Projects", "Training", "Activity Log"];
   const [tab, setTab] = useState("Personal");
+  const [employee, setEmployee] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  const canManage = ["Founder", "Super Admin", "HR"].includes(role);
+
+  async function load() {
+    setLoading(true);
+    setError("");
+    try {
+      const { data } = await api.get(`/employees/${id}`);
+      setEmployee(data);
+    } catch (err) {
+      setError(err?.response?.data?.message || "Could not load employee.");
+    } finally {
+      setLoading(false);
+    }
+  }
+  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [id]);
+
+  async function toggleStatus() {
+    if (!employee) return;
+    const next = employee.status === "Active" ? "Inactive" : "Active";
+    setBusy(true);
+    try {
+      const { data } = await api.patch(`/employees/${id}/status`, { status: next });
+      setEmployee(data);
+      onChanged?.();
+    } catch (err) {
+      setError(err?.response?.data?.message || "Could not update status.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDelete() {
+    setBusy(true);
+    try {
+      await api.delete(`/employees/${id}`);
+      onChanged?.();
+      onClose();
+    } catch (err) {
+      setError(err?.response?.data?.message || "Could not delete employee.");
+      setBusy(false);
+      setConfirmDelete(false);
+    }
+  }
+
+  if (loading) {
+    return <Modal title="" onClose={onClose} wide><div className="text-center text-zinc-500 text-sm py-10">Loading…</div></Modal>;
+  }
+  if (!employee) {
+    return <Modal title="" onClose={onClose} wide><div className="text-center text-rose-300 text-sm py-10">{error || "Employee not found."}</div></Modal>;
+  }
+
   return (
     <Modal title="" onClose={onClose} wide>
-      <div className="flex items-center gap-3 mb-4">
-        <Avatar name={employee.name} size={48}/>
-        <div>
-          <div className="f-display text-lg text-zinc-100">{employee.name} <span className="text-zinc-500 text-sm font-normal">· {employee.designation}</span></div>
-          <div className="flex items-center gap-2 mt-1"><IdTag id={employee.id}/><span className="text-xs text-zinc-500">Joined {employee.joined}</span><Badge tone="lime">{employee.status}</Badge></div>
+      <div className="flex items-start justify-between mb-4 gap-3 flex-wrap">
+        <div className="flex items-center gap-3">
+          {employee.photo
+            ? <img src={employee.photo} alt="" className="w-12 h-12 rounded-full object-cover border border-zinc-700" />
+            : <Avatar name={employee.name} size={48} />}
+          <div>
+            <div className="f-display text-lg text-zinc-100">{employee.name} <span className="text-zinc-500 text-sm font-normal">· {employee.designation || "—"}</span></div>
+            <div className="flex items-center gap-2 mt-1 flex-wrap">
+              <IdTag id={employee.employeeId} />
+              <span className="text-xs text-zinc-500">Joined {fmtDate(employee.joinedOn)}</span>
+              <Badge tone={statusTone(employee.status)}>{employee.status}</Badge>
+            </div>
+          </div>
         </div>
+        {canManage && (
+          <div className="flex items-center gap-2">
+            <Btn size="sm" variant="secondary" onClick={() => onEdit(employee)}>Edit</Btn>
+            <Btn size="sm" variant="secondary" icon={employee.status === "Active" ? UserX : UserCheck} onClick={toggleStatus} disabled={busy}>
+              {employee.status === "Active" ? "Deactivate" : "Activate"}
+            </Btn>
+            {!confirmDelete ? (
+              <Btn size="sm" variant="danger" icon={Trash2} onClick={() => setConfirmDelete(true)}>Delete</Btn>
+            ) : (
+              <div className="flex items-center gap-1">
+                <span className="text-xs text-rose-300">Delete permanently?</span>
+                <Btn size="sm" variant="danger" onClick={handleDelete} disabled={busy}>Yes</Btn>
+                <Btn size="sm" variant="ghost" onClick={() => setConfirmDelete(false)}>No</Btn>
+              </div>
+            )}
+          </div>
+        )}
       </div>
-      <Tabs tabs={tabs} active={tab} onChange={setTab}/>
+
+      {error && <div className="mb-3 text-sm text-rose-300 bg-rose-500/10 border border-rose-500/30 rounded-lg px-3 py-2">{error}</div>}
+
+      <Tabs tabs={tabs} active={tab} onChange={setTab} />
       <div className="text-sm text-zinc-300">
-        {tab==="Personal" && <div className="grid grid-cols-2 gap-3">
-          <div><span className="text-zinc-500 text-xs block">DOB</span>12 Mar 2003</div>
-          <div><span className="text-zinc-500 text-xs block">Phone</span>+91 9XXXXXXXXX</div>
-          <div><span className="text-zinc-500 text-xs block">Personal Email</span>{employee.name.split(" ")[0].toLowerCase()}@mail.com</div>
-          <div><span className="text-zinc-500 text-xs block">Blood Group</span>O+</div>
-          <div className="col-span-2"><span className="text-zinc-500 text-xs block">Address</span>Delhi, India</div>
+        {tab === "Personal" && <div className="grid grid-cols-2 gap-3">
+          <div><span className="text-zinc-500 text-xs block">DOB</span>{employee.dob ? fmtDate(employee.dob) : "—"}</div>
+          <div><span className="text-zinc-500 text-xs block">Phone</span>{employee.phone || "—"}</div>
+          <div><span className="text-zinc-500 text-xs block">Email</span>{employee.email}</div>
+          <div><span className="text-zinc-500 text-xs block">Blood Group</span>{employee.bloodGroup || "—"}</div>
+          <div className="col-span-2"><span className="text-zinc-500 text-xs block">Address</span>{employee.address || "—"}</div>
+          <div className="col-span-2"><span className="text-zinc-500 text-xs block">Emergency Contact</span>{employee.emergencyContact || "—"}</div>
         </div>}
-        {tab==="Professional" && <div className="grid grid-cols-2 gap-3">
-          <div><span className="text-zinc-500 text-xs block">Department</span>{employee.dept}</div>
-          <div><span className="text-zinc-500 text-xs block">Reporting Manager</span>Nandini Kapoor</div>
-          <div><span className="text-zinc-500 text-xs block">Employment Type</span>{employee.type}</div>
-          <div><span className="text-zinc-500 text-xs block">Work Location</span>Delhi Office</div>
+        {tab === "Professional" && <div className="grid grid-cols-2 gap-3">
+          <div><span className="text-zinc-500 text-xs block">Department</span>{employee.department}</div>
+          <div><span className="text-zinc-500 text-xs block">Role</span>{employee.role}</div>
+          <div><span className="text-zinc-500 text-xs block">Reporting Manager</span>{employee.reportingManager ? `${employee.reportingManager.name} (${employee.reportingManager.employeeId})` : "—"}</div>
+          <div><span className="text-zinc-500 text-xs block">Employment Type</span>{employee.employmentType}</div>
+          <div><span className="text-zinc-500 text-xs block">Employee ID</span><IdTag id={employee.employeeId} /></div>
+          <div><span className="text-zinc-500 text-xs block">Date of Joining</span>{fmtDate(employee.joinedOn)}</div>
         </div>}
-        {tab==="Bank" && <div className="grid grid-cols-2 gap-3">
-          <div><span className="text-zinc-500 text-xs block">Account Number</span>•••• •••• 4821</div>
-          <div><span className="text-zinc-500 text-xs block">IFSC</span>HDFC0001234</div>
-          <div><span className="text-zinc-500 text-xs block">PAN</span>AXXXX1234X <button className="text-lime-300 text-xs ml-1">Reveal</button></div>
+        {tab === "Bank" && <div className="grid grid-cols-2 gap-3">
+          <div><span className="text-zinc-500 text-xs block">Account Number</span>{employee.bankDetails?.accountNumber ? `•••• ${employee.bankDetails.accountNumber.slice(-4)}` : "Not set"}</div>
+          <div><span className="text-zinc-500 text-xs block">IFSC</span>{employee.bankDetails?.ifsc || "Not set"}</div>
+          <div><span className="text-zinc-500 text-xs block">PAN</span>{employee.bankDetails?.pan || "Not set"}</div>
         </div>}
-        {tab==="Documents" && <div className="space-y-2">{["Offer Letter","Appointment Letter","NDA","ID Proof"].map(d=><div key={d} className="flex items-center justify-between bg-zinc-800/50 rounded px-3 py-2"><span>{d}</span><Btn size="sm" variant="ghost" icon={Download}>View</Btn></div>)}</div>}
-        {tab==="Salary" && <div className="grid grid-cols-2 gap-3"><div><span className="text-zinc-500 text-xs block">CTC</span>₹4,20,000/yr</div><div><span className="text-zinc-500 text-xs block">Net Monthly</span>₹33,000</div></div>}
-        {tab==="Attendance" && <div className="text-zinc-400">19 Present · 2 Late · 1 Absent · 1 Half-day this month.</div>}
-        {tab==="Leaves" && <div className="text-zinc-400">Balance: 12 days · 2 requests pending approval.</div>}
-        {tab==="Performance" && <div className="f-display text-2xl text-lime-300">8.2/10 <span className="text-sm text-zinc-500 font-normal">Q3 2026</span></div>}
-        {tab==="Assets" && <div className="text-zinc-400">LAP-0012 — Laptop, issued 15 Jun 2026.</div>}
-        {tab==="Projects" && <div className="text-zinc-400">Rio Bubbly Campus Activation — Content Lead.</div>}
-        {tab==="Training" && <div className="text-zinc-400">Onboarding Walkthrough — Completed 16 Jun 2026.</div>}
-        {tab==="Activity Log" && <div className="text-zinc-500 text-xs space-y-1"><div>13 Jul, 9:02 AM — Logged in</div><div>10 Jul, 4:15 PM — Profile updated (Phone)</div></div>}
+        {tab === "Documents" && <div className="space-y-2">{["Offer Letter", "Appointment Letter", "NDA", "ID Proof"].map((d) => <div key={d} className="flex items-center justify-between bg-zinc-800/50 rounded px-3 py-2"><span>{d}</span><Btn size="sm" variant="ghost" icon={Download}>View</Btn></div>)}</div>}
+        {tab === "Salary" && <div className="text-zinc-500 text-sm">Managed under Payroll → Salary Structure.</div>}
+        {tab === "Attendance" && <div className="text-zinc-500 text-sm">See the Attendance module for this employee's full log.</div>}
+        {tab === "Leaves" && <div className="text-zinc-500 text-sm">See the Leaves module for balance & history.</div>}
+        {tab === "Performance" && <div className="text-zinc-500 text-sm">See the Performance module for review history.</div>}
+        {tab === "Assets" && <div className="text-zinc-500 text-sm">See the Assets module for issued items.</div>}
+        {tab === "Projects" && <div className="text-zinc-500 text-sm">No project assignment data yet.</div>}
+        {tab === "Training" && <div className="text-zinc-500 text-sm">No training records yet.</div>}
+        {tab === "Activity Log" && <div className="text-zinc-500 text-xs space-y-1">
+          <div>Created {employee.createdAt ? new Date(employee.createdAt).toLocaleString("en-IN") : "—"}</div>
+          <div>Last updated {employee.updatedAt ? new Date(employee.updatedAt).toLocaleString("en-IN") : "—"}</div>
+        </div>}
       </div>
     </Modal>
   );
@@ -1493,7 +2234,6 @@ function AppShell({ onLogout, currentUser }) {
   const [active, setActive] = useState("dashboard");
   const [role, setRole] = useState(currentUser?.role || "Founder");
   const [collapsed, setCollapsed] = useState(false);
-  const [profile, setProfile] = useState(null);
 
   const activeMeta = NAV.find(n=>n.id===active);
   // Guard: if current role loses access to active nav, fall back to dashboard
@@ -1501,7 +2241,7 @@ function AppShell({ onLogout, currentUser }) {
 
   return (
     <div className="min-h-screen bg-zinc-950 flex f-body">
-      <Sidebar active={active} setActive={setActive} role={role} collapsed={collapsed} setCollapsed={setCollapsed}/>
+      <Sidebar active={active} setActive={setActive} role={role} collapsed={collapsed} setCollapsed={setCollapsed} currentUser={currentUser}/>
       <div className="flex-1 min-w-0 flex flex-col">
         <Topbar role={role} setRole={setRole} onLogout={onLogout} screenLabel={activeMeta.label}/>
         <div className="p-5 flex-1 overflow-y-auto">
@@ -1509,13 +2249,13 @@ function AppShell({ onLogout, currentUser }) {
             <Card className="p-6 text-sm text-zinc-500 flex items-center gap-2"><ShieldCheck size={16}/> The "{role}" role doesn't have access to {activeMeta.label}. Switch role to preview, or pick another module.</Card>
           ) : (
             <>
-              {active==="dashboard" && <Dashboard role={role}/>}
+              {active==="dashboard" && <Dashboard role={role} currentUser={currentUser}/>}
               {active==="tasks" && <TasksScreen/>}
               {active==="timesheet" && <TimesheetScreen/>}
-              {active==="dailyreport" && <DailyReportScreen/>}
+              {active==="dailyreport" && <DailyReportScreen role={role} currentUser={currentUser}/>}
               {active==="social" && <SocialScreen/>}
               {active==="leaves" && <LeavesScreen role={role}/>}
-              {active==="directory" && <DirectoryScreen onOpenProfile={setProfile}/>}
+              {active==="directory" && <DirectoryScreen role={role}/>}
               {active==="recruitment" && <RecruitmentScreen/>}
               {active==="onboarding" && <OnboardingScreen/>}
               {active==="attendance" && <AttendanceScreen role={role}/>}
@@ -1533,7 +2273,6 @@ function AppShell({ onLogout, currentUser }) {
           )}
         </div>
       </div>
-      {profile && <EmployeeProfileModal employee={profile} onClose={()=>setProfile(null)}/>}
     </div>
   );
 }
@@ -1563,7 +2302,7 @@ export default function INGLU_EMS() {
       {screen==="signup" && <SignupScreen onLogin={handleLogin} goto={setScreen}/>}
       {screen==="otp" && <OtpScreen onLogin={handleLogin} goto={setScreen}/>}
       {screen==="forgot" && <ForgotScreen goto={setScreen}/>}
-      {screen==="firstTime" && <FirstTimeScreen onDone={()=>setScreen("app")}/>}
+      {screen==="firstTime" && <FirstTimeScreen onDone={()=>setScreen("app")} currentUser={currentUser}/>}
       {screen==="app" && <AppShell onLogout={handleLogout} currentUser={currentUser}/>}
     </div>
   );

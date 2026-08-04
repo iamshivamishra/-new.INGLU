@@ -69,3 +69,20 @@ export async function sendOtpEmail({ to, code, purpose }) {
 
   return sendMail({ to, subject, html, text });
 }
+
+/**
+ * Daily Work Report reminder — fired automatically at 6:00 PM for anyone who
+ * hasn't submitted today's report (see utils/scheduler.js), and available for
+ * managers to trigger manually via the "Nudge" action on the Review Queue.
+ */
+export async function sendReportReminderEmail({ to, name }) {
+  const subject = "Reminder: Submit your Daily Work Report";
+  const html = `
+    <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px; border: 1px solid #e5e5e5; border-radius: 8px;">
+      <h2 style="color: #111; margin-bottom: 8px;">Don't forget today's report</h2>
+      <p style="color: #444; font-size: 14px;">Hi ${name || "there"}, you haven't submitted your Daily Work Report for today yet. Please log in to INGLU EMS and submit it before the end of your day.</p>
+    </div>
+  `;
+  const text = `Hi ${name || "there"}, you haven't submitted your Daily Work Report for today yet. Please log in to INGLU EMS and submit it.`;
+  return sendMail({ to, subject, html, text });
+}
