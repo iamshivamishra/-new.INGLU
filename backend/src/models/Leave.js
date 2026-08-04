@@ -6,6 +6,7 @@ const leaveSchema = new mongoose.Schema({
   to: { type: Date, required: true },
   halfDay: { type: Boolean, default: false },
   reason: String,
+  documentUrl: String,
   status: { type: String, enum: ["Pending","Approved","Rejected"], default: "Pending" },
   approver: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
   approverComment: String,

@@ -7,7 +7,11 @@ function daysBetween(from, to) {
 }
 
 export async function applyLeave(req, res) {
-  const { type, from, to, halfDay, reason } = req.body;
+  const { type, from, to, halfDay, reason, documentUrl } = req.body;
+  if (!type || !from || !to) {
+    return res.status(400).json({ message: "Leave type, from and to dates are required." });
+  }
+
   let balance = await LeaveBalance.findOne({ user: req.user._id });
   if (!balance) balance = await LeaveBalance.create({ user: req.user._id });
 
@@ -17,7 +21,7 @@ export async function applyLeave(req, res) {
   const isLOP = requestedDays > available;
 
   const leave = await Leave.create({
-    user: req.user._id, type, from, to, halfDay, reason, isLOP,
+    user: req.user._id, type, from, to, halfDay, reason, documentUrl, isLOP,
     status: "Pending",
   });
   res.status(201).json({ leave, isLOP, balance });

@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from "react";
+import React, { useState, useMemo, useEffect, useRef  } from "react";
 import {
   Home, ListChecks, Clock, FileText, Send, CalendarDays, Users, UserPlus,
   ClipboardList, Fingerprint, TrendingUp, Wallet, Briefcase, Target,
@@ -819,80 +819,327 @@ function Dashboard({ role, currentUser }) {
 
 /* ============================== MY WORK MODULES ============================== */
 
-function TasksScreen() {
+const TASK_STATUSES = ["To Do","In Progress","In Review","Done"];
+
+function fmtDue(d) {
+  if (!d) return "—";
+  return new Date(d).toLocaleDateString("en-IN", { day:"2-digit", month:"short" });
+}
+
+function NewTaskModal({ onClose, onCreated, employees, currentUser }) {
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [assignee, setAssignee] = useState(currentUser?._id || "");
+  const [priority, setPriority] = useState("Medium");
+  const [dueDate, setDueDate] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit() {
+    if (!title.trim()) { setError("Task title is required."); return; }
+    setSaving(true);
+    setError("");
+    try {
+      await api.post("/tasks", {
+        title: title.trim(),
+        description,
+        assignee: assignee || undefined,
+        priority,
+        dueDate: dueDate || undefined,
+      });
+      onCreated();
+      onClose();
+    } catch (e) {
+      setError(e?.response?.data?.message || "Couldn't create task. Try again.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Modal title="New Task" onClose={onClose}>
+      {error && <div className="mb-3 text-xs text-rose-300 bg-rose-500/10 border border-rose-500/30 rounded-lg px-3 py-2">{error}</div>}
+      <Field label="Title">
+        <input className={inputCls} value={title} onChange={(e)=>setTitle(e.target.value)} placeholder="e.g. Reel script — BrandX" autoFocus/>
+      </Field>
+      <Field label="Description">
+        <textarea className={inputCls + " min-h-[70px]"} value={description} onChange={(e)=>setDescription(e.target.value)} placeholder="Optional details…"/>
+      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Assignee">
+          <select className={inputCls} value={assignee} onChange={(e)=>setAssignee(e.target.value)}>
+            <option value="">Unassigned</option>
+            {employees.map((u)=>(
+              <option key={u._id} value={u._id}>{u.name}{u._id===currentUser?._id ? " (Me)" : ""}</option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Priority">
+          <select className={inputCls} value={priority} onChange={(e)=>setPriority(e.target.value)}>
+            <option>Low</option><option>Medium</option><option>High</option>
+          </select>
+        </Field>
+      </div>
+      <Field label="Due Date">
+        <input type="date" className={inputCls} value={dueDate} onChange={(e)=>setDueDate(e.target.value)}/>
+      </Field>
+      <div className="flex justify-end gap-2 mt-4">
+        <Btn variant="secondary" onClick={onClose}>Cancel</Btn>
+        <Btn onClick={submit} disabled={saving}>{saving ? "Creating…" : "Create Task"}</Btn>
+      </div>
+    </Modal>
+  );
+}
+
+function TasksScreen({ currentUser }) {
   const [view, setView] = useState("Board");
+  const [tasks, setTasks] = useState([]);
+  const [employees, setEmployees] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [showNew, setShowNew] = useState(false);
+  const [dragId, setDragId] = useState(null);
+
+  async function load() {
+    setLoading(true);
+    setError("");
+    try {
+      const [tasksRes, empRes] = await Promise.all([
+        api.get("/tasks"),
+        api.get("/employees"),
+      ]);
+      setTasks(tasksRes.data || []);
+      setEmployees(empRes.data || []);
+    } catch (e) {
+      setError(e?.response?.data?.message || "Couldn't load tasks.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { load(); }, []);
+
+  async function moveTask(id, status) {
+    setTasks((prev) => prev.map((t) => (t._id === id ? { ...t, status } : t)));
+    try {
+      await api.patch(`/tasks/${id}/status`, { status });
+    } catch (e) {
+      load(); // revert to server truth if it failed
+    }
+  }
+
+  const grouped = TASK_STATUSES.reduce((acc, s) => {
+    acc[s] = tasks.filter((t) => t.status === s);
+    return acc;
+  }, {});
+
   return (
     <div>
-      <SectionHeader title="Tasks — Marketing Team" action={
+      <SectionHeader title="Tasks" action={
         <div className="flex gap-2">
           {["Board","List","Calendar"].map(v=><Btn key={v} size="sm" variant={view===v?"primary":"secondary"} onClick={()=>setView(v)}>{v}</Btn>)}
-          <Btn size="sm" icon={Plus}>New Task</Btn>
+          <Btn size="sm" icon={Plus} onClick={()=>setShowNew(true)}>New Task</Btn>
         </div>
       }/>
-      {view==="Board" && (
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-          {Object.entries(TASKS).map(([col, items]) => (
-            <div key={col} className="bg-zinc-900/60 border border-zinc-800 rounded-xl p-2 min-h-[160px]">
-              <div className="text-xs text-zinc-500 font-medium px-1 pb-2">{col} ({items.length})</div>
-              {items.map((t,i)=>(
-                <Card key={i} className="p-2.5 mb-2">
-                  <div className="text-sm text-zinc-200 mb-1">{t.t}</div>
-                  <div className="flex items-center justify-between">
-                    <Badge tone={t.p==="High"?"rose":t.p==="Med"?"amber":"zinc"}>{t.p}</Badge>
-                    <span className="text-[11px] text-zinc-500">{t.due}</span>
-                  </div>
-                  <div className="flex items-center gap-1.5 mt-2"><Avatar name={t.who} size={18}/><span className="text-[11px] text-zinc-500">{t.who}</span></div>
-                </Card>
+      {error && <div className="mb-3 text-xs text-rose-300 bg-rose-500/10 border border-rose-500/30 rounded-lg px-3 py-2">{error}</div>}
+      {loading ? (
+        <Card className="p-6 text-center text-zinc-500 text-sm">Loading tasks…</Card>
+      ) : !tasks.length ? (
+        <Card className="p-6 text-center text-zinc-500 text-sm">No tasks yet. Click "New Task" to create one.</Card>
+      ) : (
+        <>
+          {view==="Board" && (
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+              {TASK_STATUSES.map((col) => (
+                <div key={col}
+                  onDragOver={(e)=>e.preventDefault()}
+                  onDrop={()=>{ if (dragId) moveTask(dragId, col); setDragId(null); }}
+                  className="bg-zinc-900/60 border border-zinc-800 rounded-xl p-2 min-h-[160px]">
+                  <div className="text-xs text-zinc-500 font-medium px-1 pb-2">{col} ({grouped[col].length})</div>
+                  {grouped[col].map((t)=>(
+                    <Card key={t._id} className="p-2.5 mb-2 cursor-grab active:cursor-grabbing"
+                      draggable
+                      onDragStart={()=>setDragId(t._id)}>
+                      <div className="text-sm text-zinc-200 mb-1">{t.title}</div>
+                      <div className="flex items-center justify-between">
+                        <Badge tone={t.priority==="High"?"rose":t.priority==="Medium"?"amber":"zinc"}>{t.priority}</Badge>
+                        <span className="text-[11px] text-zinc-500">{fmtDue(t.dueDate)}</span>
+                      </div>
+                      <div className="flex items-center justify-between mt-2">
+                        <div className="flex items-center gap-1.5">
+                          <Avatar name={t.assignee?.name || "?"} size={18}/>
+                          <span className="text-[11px] text-zinc-500">{t.assignee?.name || "Unassigned"}</span>
+                        </div>
+                        <select
+                          className="bg-transparent text-[11px] text-zinc-500 border border-zinc-800 rounded px-1 py-0.5 outline-none"
+                          value={t.status}
+                          onChange={(e)=>moveTask(t._id, e.target.value)}>
+                          {TASK_STATUSES.map((s)=><option key={s} value={s}>{s}</option>)}
+                        </select>
+                      </div>
+                    </Card>
+                  ))}
+                </div>
               ))}
             </div>
-          ))}
-        </div>
+          )}
+          {view==="List" && (
+            <Card className="p-2">
+              <Table columns={["Task","Assignee","Priority","Due Date","Status"]} rows={
+                tasks.map((t)=>(
+                  <tr key={t._id}>
+                    <Td>{t.title}</Td>
+                    <Td>{t.assignee?.name || "Unassigned"}</Td>
+                    <Td><Badge tone={t.priority==="High"?"rose":t.priority==="Medium"?"amber":"zinc"}>{t.priority}</Badge></Td>
+                    <Td>{fmtDue(t.dueDate)}</Td>
+                    <Td><Badge tone="lime">{t.status}</Badge></Td>
+                  </tr>
+                ))
+              }/>
+            </Card>
+          )}
+          {view==="Calendar" && <Card className="p-6 text-center text-zinc-500 text-sm">Monthly calendar grid with tasks plotted on their due dates.</Card>}
+        </>
       )}
-      {view==="List" && (
-        <Card className="p-2">
-          <Table columns={["Task","Assignee","Priority","Due Date","Status"]} rows={
-            Object.entries(TASKS).flatMap(([status,items])=>items.map((t,i)=>(
-              <tr key={status+i}><Td>{t.t}</Td><Td>{t.who}</Td><Td><Badge tone={t.p==="High"?"rose":"zinc"}>{t.p}</Badge></Td><Td>{t.due}</Td><Td><Badge tone="lime">{status}</Badge></Td></tr>
-            )))
-          }/>
-        </Card>
+      {showNew && (
+        <NewTaskModal
+          onClose={()=>setShowNew(false)}
+          onCreated={load}
+          employees={employees}
+          currentUser={currentUser}
+        />
       )}
-      {view==="Calendar" && <Card className="p-6 text-center text-zinc-500 text-sm">Monthly calendar grid with tasks plotted on their due dates.</Card>}
     </div>
   );
 }
 
-function TimesheetScreen() {
-  const [rows, setRows] = useState([
-    { time:"10:00–11:30 AM", task:"BrandX Reel Script", hrs:"1.5h" },
-    { time:"11:30–1:00 PM", task:"Team Standup + Content Review", hrs:"1.5h" },
-    { time:"2:00–4:30 PM", task:"Select task/client…", hrs:"2.5h" },
-    { time:"4:30–7:00 PM", task:"Select task/client…", hrs:"2.5h" },
-  ]);
-  const [showGate, setShowGate] = useState(false);
+/* ============================== TIMESHEET (self) ============================== */
+/* Fully wired to /api/timesheets. Mandatory before Clock Out — see AttendanceScreen. */
+
+function timesheetInputCls(disabled) {
+  return `${inputCls} py-1.5 ${disabled ? "opacity-60 cursor-not-allowed" : ""}`;
+}
+
+function TimesheetScreen({ goto }) {
+  const [entries, setEntries] = useState([]);
+  const [timesheet, setTimesheet] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  const submitted = !!timesheet?.submitted;
+  const totalHours = entries.reduce((sum, e) => sum + (Number(e.hours) || 0), 0);
+  const OFFICE_HOURS_REQUIRED = 9;
+
+  async function load() {
+    setLoading(true);
+    setError("");
+    try {
+      const { data } = await api.get("/timesheets/mine");
+      setTimesheet(data);
+      setEntries((data.entries || []).length ? data.entries : [{ start: "", end: "", taskOrClient: "", hours: "", notes: "" }]);
+    } catch (err) {
+      setError(err?.response?.data?.message || "Could not load today's timesheet.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
+
+  function updateEntry(i, field, val) {
+    setEntries((prev) => prev.map((e, idx) => (idx === i ? { ...e, [field]: val } : e)));
+  }
+  function addEntry() {
+    setEntries((prev) => [...prev, { start: "", end: "", taskOrClient: "", hours: "", notes: "" }]);
+  }
+  function removeEntry(i) {
+    setEntries((prev) => prev.filter((_, idx) => idx !== i));
+  }
+
+  async function save() {
+    setSaving(true);
+    setError("");
+    setNotice("");
+    try {
+      const cleaned = entries
+        .filter((e) => e.taskOrClient || e.hours)
+        .map((e) => ({ ...e, hours: Number(e.hours) || 0 }));
+      const { data } = await api.post("/timesheets", { entries: cleaned });
+      setTimesheet(data);
+      setEntries(data.entries.length ? data.entries : [{ start: "", end: "", taskOrClient: "", hours: "", notes: "" }]);
+      setNotice("Saved.");
+    } catch (err) {
+      setError(err?.response?.data?.message || "Could not save timesheet.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function submit() {
+    setSaving(true);
+    setError("");
+    setNotice("");
+    try {
+      const cleaned = entries
+        .filter((e) => e.taskOrClient || e.hours)
+        .map((e) => ({ ...e, hours: Number(e.hours) || 0 }));
+      const { data: saved } = await api.post("/timesheets", { entries: cleaned });
+      const { data: finalTs } = await api.post(`/timesheets/${saved._id}/submit`);
+      setTimesheet(finalTs);
+      setEntries(finalTs.entries);
+      setNotice("Timesheet submitted. You can now clock out.");
+    } catch (err) {
+      setError(err?.response?.data?.message || "Could not submit timesheet.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (loading) return <Card className="p-6 text-sm text-zinc-500">Loading today's timesheet…</Card>;
+
   return (
     <div>
-      <SectionHeader title="Timesheet — 13 Jul 2026 (Office Hours 10:00 AM – 7:00 PM)" action={<Btn size="sm" icon={Plus}>Add Entry</Btn>}/>
+      <SectionHeader title={`Timesheet — ${todayISO()} (Office Hours 10:00 AM – 7:00 PM)`} action={!submitted && <Btn size="sm" icon={Plus} onClick={addEntry}>Add Entry</Btn>}/>
+      {error && <div className="flex items-center gap-2 text-sm mb-3 px-3 py-2 rounded-lg border border-rose-500/30 bg-rose-500/5 text-rose-300"><XCircle size={15}/>{error}</div>}
+      {notice && <div className="flex items-center gap-2 text-sm mb-3 px-3 py-2 rounded-lg border border-lime-300/30 bg-lime-300/5 text-lime-300"><CheckCircle2 size={15}/>{notice}</div>}
+      {submitted && (
+        <div className="flex items-center gap-2 text-sm mb-3 px-3 py-2 rounded-lg border border-violet-400/30 bg-violet-400/5 text-violet-300">
+          <CheckCircle2 size={15}/> Submitted at {fmtTime(timesheet.submittedAt)}{timesheet.late ? " (flagged late)" : ""}. Read-only until a manager reopens it.
+        </div>
+      )}
       <Card className="p-2 mb-3">
-        <Table columns={["Time","Task / Client / Project","Hours","Notes",""]} rows={rows.map((r,i)=>(
-          <tr key={i}><Td>{r.time}</Td><Td>{r.task}</Td><Td>{r.hrs}</Td><Td><input className={`${inputCls} py-1`} placeholder="—"/></Td><Td><MoreHorizontal size={14} className="text-zinc-500"/></Td></tr>
+        <Table columns={["Time","Task / Client / Project","Hours","Notes",""]} rows={entries.map((r,i)=>(
+          <tr key={i}>
+            <Td>
+              <div className="flex items-center gap-1">
+                <input className={timesheetInputCls(submitted) + " w-20"} placeholder="10:00" value={r.start} disabled={submitted} onChange={(e)=>updateEntry(i,"start",e.target.value)}/>
+                <span className="text-zinc-600">–</span>
+                <input className={timesheetInputCls(submitted) + " w-20"} placeholder="11:30" value={r.end} disabled={submitted} onChange={(e)=>updateEntry(i,"end",e.target.value)}/>
+              </div>
+            </Td>
+            <Td><input className={timesheetInputCls(submitted)} placeholder="Select task/client…" value={r.taskOrClient} disabled={submitted} onChange={(e)=>updateEntry(i,"taskOrClient",e.target.value)}/></Td>
+            <Td><input type="number" step="0.5" className={timesheetInputCls(submitted) + " w-16"} placeholder="0" value={r.hours} disabled={submitted} onChange={(e)=>updateEntry(i,"hours",e.target.value)}/></Td>
+            <Td><input className={timesheetInputCls(submitted)} placeholder="—" value={r.notes} disabled={submitted} onChange={(e)=>updateEntry(i,"notes",e.target.value)}/></Td>
+            <Td>{!submitted && <button onClick={()=>removeEntry(i)} className="text-zinc-600 hover:text-rose-400"><Trash2 size={14}/></button>}</Td>
+          </tr>
         ))}/>
       </Card>
-      <Card className="p-3 mb-4 flex items-center gap-2 border-amber-500/30">
-        <AlertTriangle size={16} className="text-amber-400"/>
-        <span className="text-sm text-amber-300">Gap detected: 1:00–2:00 PM unaccounted (lunch/break?)</span>
-        <Btn size="sm" variant="secondary" className="ml-auto">Mark as Break</Btn>
-      </Card>
-      <div className="flex gap-2">
-        <Btn onClick={()=>setShowGate(false)}>Submit Timesheet</Btn>
-        <Btn variant="secondary" onClick={()=>setShowGate(true)}>Try Clock Out (unsubmitted)</Btn>
-      </div>
-      {showGate && (
-        <Modal title="Clock Out Blocked" onClose={()=>setShowGate(false)}>
-          <div className="flex items-center gap-2 text-amber-300 mb-3"><AlertTriangle size={18}/> You must fill today's Timesheet before you can clock out.</div>
-          <p className="text-sm text-zinc-500 mb-4">This is enforced server-side on the clock-out endpoint — it can't be bypassed from web, mobile, or direct API calls.</p>
-          <Btn className="w-full justify-center" onClick={()=>setShowGate(false)}>Fill Timesheet Now</Btn>
-        </Modal>
+      <div className="text-xs text-zinc-500 mb-3">Total logged: <span className="text-zinc-200 f-mono">{totalHours}h</span> / {OFFICE_HOURS_REQUIRED}h expected</div>
+      {!submitted && totalHours < OFFICE_HOURS_REQUIRED && entries.some((e)=>e.taskOrClient) && (
+        <Card className="p-3 mb-4 flex items-center gap-2 border-amber-500/30">
+          <AlertTriangle size={16} className="text-amber-400"/>
+          <span className="text-sm text-amber-300">Logged hours are below the {OFFICE_HOURS_REQUIRED}h office window — double check for gaps before submitting.</span>
+        </Card>
+      )}
+      {!submitted ? (
+        <div className="flex gap-2">
+          <Btn variant="secondary" onClick={save} disabled={saving}>{saving?"Saving…":"Save Draft"}</Btn>
+          <Btn onClick={submit} disabled={saving}>{saving?"Submitting…":"Submit Timesheet"}</Btn>
+        </div>
+      ) : (
+        <Btn variant="secondary" icon={Fingerprint} onClick={()=>goto?.("attendance")}>Go to Clock Out</Btn>
       )}
     </div>
   );
@@ -939,10 +1186,18 @@ function DailyReportSubmit({ currentUser }) {
     setError("");
     try {
       const [tasksRes, reportRes] = await Promise.all([
-        api.get("/tasks", { params: { assignee: currentUser?._id } }),
-        api.get("/daily-reports/mine/today"),
-      ]);
-      setMyTasks(tasksRes.data || []);
+  api.get("/tasks"),
+  api.get("/daily-reports/mine/today"),
+]);
+
+    const myId = String(currentUser?._id || "");
+    const relevantTasks = (tasksRes.data || []).filter((t) => {
+    const assigneeId = String(t.assignee?._id || t.assignee || "");
+    const creatorId = String(t.createdBy?._id || t.createdBy || "");
+  return assigneeId === myId || creatorId === myId;
+});
+setMyTasks(relevantTasks);
+
       const r = reportRes.data;
       if (r) {
         setExisting(r);
@@ -1088,26 +1343,84 @@ function DailyReportSubmit({ currentUser }) {
 
 function TaskPicker({ tasks, selected, onToggle, disabled, empty }) {
   const [open, setOpen] = useState(false);
-  if (!tasks.length) return <div className={inputCls + " text-zinc-600"}>{empty}</div>;
+  const [query, setQuery] = useState("");
+  const inputRef = React.useRef(null);
+
   const selectedTasks = tasks.filter((t) => selected.has(t._id));
+  const filtered = tasks.filter((t) =>
+    t.title.toLowerCase().includes(query.trim().toLowerCase())
+  );
+
+  function openDropdown() {
+    if (disabled) return;
+    setOpen(true);
+    // give the input time to mount before focusing
+    setTimeout(() => inputRef.current?.focus(), 0);
+  }
+
   return (
     <div className="relative">
-      <button type="button" disabled={disabled} onClick={()=>setOpen((o)=>!o)}
-        className={`${inputCls} text-left flex items-center justify-between ${disabled?"opacity-60 cursor-not-allowed":"cursor-pointer"}`}>
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => (open ? setOpen(false) : openDropdown())}
+        className={`${inputCls} text-left flex items-center justify-between ${disabled ? "opacity-60 cursor-not-allowed" : "cursor-pointer"}`}
+      >
         <span className="truncate">
-          {selectedTasks.length ? selectedTasks.map((t)=>t.title).join(", ") : "+ pick from Task list"}
+          {selectedTasks.length
+            ? selectedTasks.map((t) => t.title).join(", ")
+            : tasks.length
+              ? "+ pick from Task list"
+              : (empty || "No tasks — click to view")}
         </span>
-        <ChevronDown size={14} className="text-zinc-500 shrink-0"/>
+        <ChevronDown size={14} className="text-zinc-500 shrink-0" />
       </button>
+
       {open && !disabled && (
-        <div className="absolute z-20 mt-1 w-full bg-zinc-900 border border-zinc-700 rounded-lg shadow-xl max-h-48 overflow-y-auto scrollbar-thin">
-          {tasks.map((t) => (
-            <label key={t._id} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-800 cursor-pointer">
-              <input type="checkbox" className="accent-lime-300" checked={selected.has(t._id)} onChange={()=>onToggle(t._id)}/>
-              <span className="truncate">{t.title}</span>
-              <Badge tone={t.status==="Done"?"lime":"zinc"}>{t.status}</Badge>
-            </label>
-          ))}
+        <div className="absolute z-[60] mt-1 w-full bg-zinc-900 border border-zinc-700 rounded-lg shadow-xl">
+          <div className="p-2 border-b border-zinc-800">
+            <input
+              ref={inputRef}
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onClick={(e) => e.stopPropagation()}
+              placeholder="Type to search tasks…"
+              className={inputCls + " py-1.5 text-sm"}
+            />
+          </div>
+          <div className="max-h-48 overflow-y-auto scrollbar-thin">
+            {tasks.length === 0 ? (
+              <div className="px-3 py-2 text-xs text-zinc-500">{empty || "No tasks assigned to you yet."}</div>
+            ) : filtered.length === 0 ? (
+              <div className="px-3 py-2 text-xs text-zinc-500">No matching tasks.</div>
+            ) : (
+              filtered.map((t) => (
+                <label
+                  key={t._id}
+                  className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-800 cursor-pointer"
+                >
+                  <input
+                    type="checkbox"
+                    className="accent-lime-300"
+                    checked={selected.has(t._id)}
+                    onChange={() => onToggle(t._id)}
+                  />
+                  <span className="truncate">{t.title}</span>
+                  <Badge tone={t.status === "Done" ? "lime" : "zinc"}>{t.status}</Badge>
+                </label>
+              ))
+            )}
+          </div>
+          <div className="p-2 border-t border-zinc-800 text-right">
+            <button
+              type="button"
+              onClick={() => setOpen(false)}
+              className="text-xs text-lime-300 hover:underline px-2 py-1"
+            >
+              Done
+            </button>
+          </div>
         </div>
       )}
     </div>
@@ -1115,11 +1428,15 @@ function TaskPicker({ tasks, selected, onToggle, disabled, empty }) {
 }
 
 function DailyReportReviewModal({ row, date, onClose, onReviewed }) {
+  
   const [report, setReport] = useState(null);
   const [loading, setLoading] = useState(true);
   const [comments, setComments] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+
+
+  
 
   useEffect(() => {
     (async () => {
@@ -1216,6 +1533,8 @@ function DailyReportReviewModal({ row, date, onClose, onReviewed }) {
     </Modal>
   );
 }
+
+
 
 function DailyReportManagerQueue() {
   const [date, setDate] = useState(todayISO());
@@ -1316,33 +1635,235 @@ function DailyReportScreen({ role, currentUser }) {
   );
 }
 
-function SocialScreen() {
+/* Fully wired to the backend (/api/social-submissions). Submit tab posts the
+   form (uploading the screenshot first) and reloads today's real submissions;
+   Approval Queue pulls the live pending list for manager roles and approves
+   / rejects against the API. */
+
+const SOCIAL_MANAGER_ROLES = ["Team Lead","Dept Head","HR","Founder","Super Admin"];
+
+function socialSubmittedLabel(sub) {
+  const time = sub.createdAt
+    ? new Date(sub.createdAt).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })
+    : "";
+  return `${sub.platform} ${sub.postType || ""} — Submitted ${time}${time ? " — " : ""}${sub.status}`.trim();
+}
+
+function SocialScreen({ role, currentUser }) {
   const [tab, setTab] = useState("Submit");
+  const [screenshot, setScreenshot] = useState(null);
+  const fileInputRef = useRef(null);
+
+  const [platform, setPlatform] = useState("Instagram");
+  const [type, setType] = useState("Reel");
+  const [postLink, setPostLink] = useState("");
+  const [driveLink, setDriveLink] = useState("");
+  const [caption, setCaption] = useState("");
+
+  const [submitting, setSubmitting] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [todaySubs, setTodaySubs] = useState([]);
+  const [loadingToday, setLoadingToday] = useState(true);
+
+  const [pendingRows, setPendingRows] = useState([]);
+  const [loadingPending, setLoadingPending] = useState(false);
+  const [pendingError, setPendingError] = useState("");
+  const isManager = SOCIAL_MANAGER_ROLES.includes(role);
+
+  async function loadToday() {
+    setLoadingToday(true);
+    try {
+      const { data } = await api.get("/social-submissions/today");
+      setTodaySubs(data || []);
+    } catch (err) {
+      setError(err?.response?.data?.message || "Could not load today's submissions.");
+    } finally {
+      setLoadingToday(false);
+    }
+  }
+
+  async function loadPending() {
+    setLoadingPending(true);
+    setPendingError("");
+    try {
+      const { data } = await api.get("/social-submissions/pending");
+      setPendingRows(data || []);
+    } catch (err) {
+      setPendingError(err?.response?.data?.message || "Could not load approval queue.");
+    } finally {
+      setLoadingPending(false);
+    }
+  }
+
+  useEffect(() => { loadToday(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
+  useEffect(() => { if (tab === "Approval Queue" && isManager) loadPending(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [tab]);
+
+  async function handleSubmit() {
+    if (!postLink.trim()) { alert("Please enter Post/Story Link"); return; }
+    if (!driveLink.trim()) { alert("Please enter Google Drive Link"); return; }
+    if (!screenshot) { alert("Please upload Screenshot Proof"); return; }
+
+    setSubmitting(true);
+    setError("");
+    setNotice("");
+    try {
+      let screenshotUrl = "";
+      // Screenshot is a real File object only when freshly picked (not after
+      // a reset), so upload it to get a stored URL before saving the form.
+      if (screenshot instanceof File) {
+        setUploading(true);
+        const fd = new FormData();
+        fd.append("file", screenshot);
+        const { data } = await api.post("/social-submissions/upload", fd, {
+          headers: { "Content-Type": "multipart/form-data" },
+        });
+        screenshotUrl = data.url;
+        setUploading(false);
+      }
+
+      await api.post("/social-submissions", {
+        platform,
+        postType: type,
+        postLink,
+        driveLink,
+        screenshotUrl,
+        caption,
+      });
+
+      alert("Submitted Successfully!");
+      setNotice("Submitted for approval.");
+
+      setPlatform("Instagram");
+      setType("Reel");
+      setPostLink("");
+      setDriveLink("");
+      setCaption("");
+      setScreenshot(null);
+      loadToday();
+    } catch (err) {
+      setUploading(false);
+      setError(err?.response?.data?.message || "Could not submit. Please try again.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleReview(id, status) {
+    setPendingError("");
+    try {
+      await api.patch(`/social-submissions/${id}/review`, { status });
+      loadPending();
+    } catch (err) {
+      setPendingError(err?.response?.data?.message || "Could not update this submission.");
+    }
+  }
+
   return (
     <div>
       <SectionHeader title="Social Media Submission" />
       <Tabs tabs={["Submit","Approval Queue"]} active={tab} onChange={setTab}/>
       {tab==="Submit" ? (
         <Card className="p-4 max-w-xl">
+          {error && <div className="text-sm text-rose-400 mb-3">{error}</div>}
+          {notice && <div className="text-sm text-lime-300 mb-3">{notice}</div>}
           <div className="grid grid-cols-2 gap-3">
-            <Field label="Platform"><select className={inputCls}><option>Instagram</option><option>LinkedIn</option></select></Field>
-            <Field label="Type"><select className={inputCls}><option>Reel</option><option>Post</option><option>Story</option></select></Field>
+            <Field label="Platform"><select
+  className={inputCls}
+  value={platform}
+  onChange={(e) => setPlatform(e.target.value)}
+><option>Instagram</option><option>LinkedIn</option></select></Field>
+
+            <Field label="Type"><select
+  className={inputCls}
+  value={type}
+  onChange={(e) => setType(e.target.value)}
+><option>Reel</option><option>Post</option><option>Story</option></select></Field>
+
           </div>
-          <Field label="Post/Story Link"><input className={inputCls}/></Field>
-          <Field label="Google Drive Link (raw file)"><input className={inputCls}/></Field>
-          <Field label="Screenshot Proof"><Btn variant="secondary" icon={Upload}>Upload</Btn></Field>
-          <Field label="Caption used"><textarea className={inputCls} rows={2}/></Field>
-          <Btn className="w-full justify-center mb-4">Submit for Approval</Btn>
+          <Field label="Post/Story Link"><input
+  className={inputCls}
+  value={postLink}
+  onChange={(e)=>setPostLink(e.target.value)}
+/></Field>
+
+          <Field label="Google Drive Link (raw file)"><input
+  className={inputCls}
+  value={driveLink}
+  onChange={(e)=>setDriveLink(e.target.value)}
+/></Field>
+
+          <Field label="Screenshot Proof">
+
+  <input
+    ref={fileInputRef}
+    type="file"
+    accept="image/*"
+    hidden
+    onChange={(e) => setScreenshot(e.target.files[0])}
+  />
+
+  <Btn
+    variant="secondary"
+    icon={Upload}
+    onClick={() => fileInputRef.current.click()}
+  >
+    {screenshot ? screenshot.name : "Upload"}
+  </Btn>
+
+</Field>
+          <Field label="Caption used"><textarea
+  className={inputCls}
+  rows={2}
+  value={caption}
+  onChange={(e)=>setCaption(e.target.value)}
+/></Field>
+          
+          <Btn
+  className="w-full justify-center mb-4"
+  onClick={handleSubmit}
+  disabled={submitting}
+>
+  {uploading ? "Uploading…" : submitting ? "Submitting…" : "Submit for Approval"}
+</Btn>
+
           <div className="text-xs text-zinc-500 mb-2">Today's Submissions</div>
-          <div className="flex items-center gap-2 text-sm text-lime-300 mb-1"><CheckCircle2 size={14}/> Instagram Reel — Submitted 2:15 PM — Pending Review</div>
-          <div className="flex items-center gap-2 text-sm text-amber-300"><AlertTriangle size={14}/> LinkedIn Post — Not submitted (Due by 6 PM)</div>
+          {loadingToday ? (
+            <div className="text-sm text-zinc-500">Loading…</div>
+          ) : todaySubs.length === 0 ? (
+            <div className="flex items-center gap-2 text-sm text-amber-300"><AlertTriangle size={14}/> Nothing submitted yet today.</div>
+          ) : (
+            todaySubs.map((s) => (
+              <div key={s._id} className="flex items-center gap-2 text-sm text-lime-300 mb-1">
+                <CheckCircle2 size={14}/> {socialSubmittedLabel(s)}
+              </div>
+            ))
+          )}
         </Card>
+      ) : !isManager ? (
+        <Card className="p-6 text-sm text-zinc-500 flex items-center gap-2"><ShieldCheck size={16}/> The "{role}" role doesn't have access to the approval queue.</Card>
       ) : (
         <Card className="p-2">
-          <Table columns={["Name","Platform","Link","Status","Action"]} rows={SOCIAL_QUEUE.map((s,i)=>(
-            <tr key={i}><Td>{s.name}</Td><Td>{s.platform}</Td><Td><span className="text-lime-300 flex items-center gap-1 cursor-pointer"><Link2 size={12}/> Open</span></Td><Td><Badge tone="amber">{s.status}</Badge></Td>
-            <Td><div className="flex gap-1"><Btn size="sm" variant="secondary" icon={Check}>Approve</Btn><Btn size="sm" variant="danger" icon={XCircle}>Reject</Btn></div></Td></tr>
-          ))}/>
+          {pendingError && <div className="text-sm text-rose-400 px-3 pt-3">{pendingError}</div>}
+          {loadingPending ? (
+            <div className="text-sm text-zinc-500 p-4">Loading…</div>
+          ) : pendingRows.length === 0 ? (
+            <div className="text-sm text-zinc-500 p-4">No submissions waiting for review.</div>
+          ) : (
+            <Table columns={["Name","Platform","Link","Status","Action"]} rows={pendingRows.map((s)=>(
+              <tr key={s._id}>
+                <Td>{s.user?.name || "—"}</Td>
+                <Td>{s.platform}{s.postType ? ` · ${s.postType}` : ""}</Td>
+                <Td><a href={s.postLink} target="_blank" rel="noreferrer" className="text-lime-300 flex items-center gap-1"><Link2 size={12}/> Open</a></Td>
+                <Td><Badge tone="amber">{s.status}</Badge></Td>
+                <Td><div className="flex gap-1">
+                  <Btn size="sm" variant="secondary" icon={Check} onClick={()=>handleReview(s._id,"Approved")}>Approve</Btn>
+                  <Btn size="sm" variant="danger" icon={XCircle} onClick={()=>handleReview(s._id,"Rejected")}>Reject</Btn>
+                </div></Td>
+              </tr>
+            ))}/>
+          )}
         </Card>
       )}
     </div>
@@ -1352,21 +1873,102 @@ function SocialScreen() {
 function LeavesScreen({ role }) {
   const [tab, setTab] = useState("Apply");
   const isManager = ["Founder","HR","Dept Head","Team Lead","Super Admin"].includes(role);
+
+  const [leaveType, setLeaveType] = useState("Casual");
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [halfDay, setHalfDay] = useState(false);
+  const [reason, setReason] = useState("");
+  const [document, setDocument] = useState(null);
+  const fileInputRef = useRef(null);
+
+  const [submitting, setSubmitting] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  async function handleApplySubmit() {
+    setError("");
+    setNotice("");
+    if (!from || !to) { alert("Please select From and To dates"); return; }
+    if (new Date(to) < new Date(from)) { alert("'To' date can't be before 'From' date"); return; }
+
+    setSubmitting(true);
+    try {
+      let documentUrl = "";
+      if (document instanceof File) {
+        setUploading(true);
+        const fd = new FormData();
+        fd.append("file", document);
+        const { data } = await api.post("/leaves/upload", fd, {
+          headers: { "Content-Type": "multipart/form-data" },
+        });
+        documentUrl = data.url;
+        setUploading(false);
+      }
+
+      await api.post("/leaves/apply", {
+        type: leaveType, from, to, halfDay, reason, documentUrl,
+      });
+
+      alert("Leave application submitted!");
+      setNotice("Submitted for approval.");
+      setLeaveType("Casual");
+      setFrom("");
+      setTo("");
+      setHalfDay(false);
+      setReason("");
+      setDocument(null);
+    } catch (err) {
+      setUploading(false);
+      setError(err?.response?.data?.message || "Could not submit leave. Please try again.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   return (
     <div>
       <SectionHeader title="Leave Management" />
       <Tabs tabs={isManager? ["Apply","Approval Queue","Holiday Calendar"] : ["Apply","Holiday Calendar"]} active={tab} onChange={setTab}/>
       {tab==="Apply" && (
         <Card className="p-4 max-w-md">
-          <Field label="Leave Type"><select className={inputCls}><option>Casual (Balance: 8 days)</option><option>Sick</option><option>Earned</option></select></Field>
+          {error && <div className="text-sm text-rose-400 mb-3">{error}</div>}
+          {notice && <div className="text-sm text-lime-300 mb-3">{notice}</div>}
+          <Field label="Leave Type">
+            <select className={inputCls} value={leaveType} onChange={(e)=>setLeaveType(e.target.value)}>
+              <option value="Casual">Casual</option>
+              <option value="Sick">Sick</option>
+              <option value="Earned">Earned</option>
+            </select>
+          </Field>
           <div className="grid grid-cols-2 gap-3">
-            <Field label="From"><input type="date" className={inputCls}/></Field>
-            <Field label="To"><input type="date" className={inputCls}/></Field>
+            <Field label="From"><input type="date" className={inputCls} value={from} onChange={(e)=>setFrom(e.target.value)}/></Field>
+            <Field label="To"><input type="date" className={inputCls} value={to} onChange={(e)=>setTo(e.target.value)}/></Field>
           </div>
-          <label className="flex items-center gap-2 text-xs text-zinc-400 mb-3"><input type="checkbox" className="accent-lime-300"/> Half day?</label>
-          <Field label="Reason"><textarea className={inputCls} rows={2}/></Field>
-          <Btn variant="secondary" icon={Upload} className="mb-3">Attach document (optional)</Btn>
-          <Btn className="w-full justify-center">Submit</Btn>
+          <label className="flex items-center gap-2 text-xs text-zinc-400 mb-3">
+            <input type="checkbox" className="accent-lime-300" checked={halfDay} onChange={(e)=>setHalfDay(e.target.checked)}/> Half day?
+          </label>
+          <Field label="Reason"><textarea className={inputCls} rows={2} value={reason} onChange={(e)=>setReason(e.target.value)}/></Field>
+
+          <input
+            ref={fileInputRef}
+            type="file"
+            hidden
+            onChange={(e) => setDocument(e.target.files[0] || null)}
+          />
+          <Btn
+            variant="secondary"
+            icon={Upload}
+            className="mb-3"
+            onClick={() => fileInputRef.current.click()}
+          >
+            {document ? document.name : "Attach document (optional)"}
+          </Btn>
+
+          <Btn className="w-full justify-center" onClick={handleApplySubmit} disabled={submitting}>
+            {uploading ? "Uploading…" : submitting ? "Submitting…" : "Submit"}
+          </Btn>
         </Card>
       )}
       {tab==="Approval Queue" && (
@@ -1930,41 +2532,271 @@ function OnboardingScreen() {
   );
 }
 
-function AttendanceScreen({ role }) {
+/* ============================== ATTENDANCE (HRMS) ============================== */
+/* Clock In/Out fully wired to /api/attendance, with the server-enforced
+   Timesheet gate on Clock Out (PRD §6.6/§11.4a). Team Timesheets + Calendar
+   also pull real data; Rules & Analytics has no backend yet (no Settings
+   module built) so it stays illustrative. */
+
+function fmtHM(mins) {
+  const h = Math.floor(mins / 60), m = Math.round(mins % 60);
+  return `${h}h ${m}m`;
+}
+
+function ClockInOutCard({ goto }) {
+  const [status, setStatus] = useState(null); // { attendance, timesheetSubmitted }
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [gateOpen, setGateOpen] = useState(false);
+  const [, forceTick] = useState(0);
+
+  async function load() {
+    setLoading(true);
+    setError("");
+    try {
+      const { data } = await api.get("/attendance/today-status");
+      setStatus(data);
+    } catch (err) {
+      setError(err?.response?.data?.message || "Could not load attendance status.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
+  // Live-ish working timer while clocked in.
+  useEffect(() => {
+    const t = setInterval(() => forceTick((n) => n + 1), 30000);
+    return () => clearInterval(t);
+  }, []);
+
+  const att = status?.attendance;
+  const openBreak = att?.breaks?.find((b) => !b.end);
+
+  async function run(action) {
+    setBusy(true);
+    setError("");
+    try {
+      await action();
+      await load();
+    } catch (err) {
+      if (err?.response?.data?.code === "TIMESHEET_REQUIRED") {
+        setGateOpen(true);
+      } else {
+        setError(err?.response?.data?.message || "Something went wrong.");
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const workedMins = att?.clockIn
+    ? ((att.clockOut ? new Date(att.clockOut) : new Date()) - new Date(att.clockIn)) / 60000
+    : 0;
+
+  if (loading) return <Card className="p-5 max-w-sm text-sm text-zinc-500">Loading…</Card>;
+
+  return (
+    <Card className="p-5 max-w-sm">
+      <div className="text-xs text-zinc-500 mb-1">{new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})}</div>
+      <div className="text-xs text-zinc-500 mb-4">Office Hours: 10:00 AM – 7:00 PM</div>
+      {error && <div className="text-sm text-rose-300 mb-3">{error}</div>}
+
+      {!att?.clockIn && (
+        <Btn className="w-full justify-center mb-3" disabled={busy} onClick={()=>run(()=>api.post("/attendance/clock-in"))}>
+          {busy ? "Clocking in…" : "Clock In"}
+        </Btn>
+      )}
+
+      {att?.clockIn && !att?.clockOut && (
+        <div className="mb-3">
+          <div className="text-sm text-zinc-300 mb-1">Clocked in at {fmtTime(att.clockIn)} {att.status==="Late" && <Badge tone="amber">Late</Badge>}</div>
+          <div className="text-xs text-zinc-500 mb-3">Working time: {fmtHM(workedMins)}</div>
+          <div className="flex gap-2">
+            {openBreak ? (
+              <Btn variant="secondary" className="flex-1 justify-center" disabled={busy} onClick={()=>run(()=>api.post("/attendance/break/end"))}>
+                {busy ? "…" : "End Break"}
+              </Btn>
+            ) : (
+              <Btn variant="secondary" className="flex-1 justify-center" disabled={busy} onClick={()=>run(()=>api.post("/attendance/break/start"))}>
+                {busy ? "…" : "Start Break"}
+              </Btn>
+            )}
+            <Btn className="flex-1 justify-center" disabled={busy} onClick={()=>run(()=>api.post("/attendance/clock-out"))}>
+              {busy ? "…" : "Clock Out"}
+            </Btn>
+          </div>
+        </div>
+      )}
+
+      {att?.clockOut && (
+        <div className="flex items-center gap-2 text-sm text-lime-300 mb-3">
+          <CheckCircle2 size={15}/> Clocked out at {fmtTime(att.clockOut)} — worked {fmtHM(workedMins)} today.
+        </div>
+      )}
+
+      <div className="flex items-center gap-2 text-xs text-zinc-500"><Circle size={8} className="text-lime-300 fill-current"/> Office Wi-Fi detected</div>
+
+      {gateOpen && (
+        <Modal title="Clock Out Blocked" onClose={()=>setGateOpen(false)}>
+          <div className="flex items-center gap-2 text-amber-300 mb-3"><AlertTriangle size={18}/> You must fill today's Timesheet before you can clock out.</div>
+          <p className="text-sm text-zinc-500 mb-4">This is enforced server-side on the clock-out endpoint — it can't be bypassed from web, mobile, or direct API calls.</p>
+          <Btn className="w-full justify-center" onClick={()=>{ setGateOpen(false); goto?.("timesheet"); }}>Fill Timesheet Now</Btn>
+        </Modal>
+      )}
+    </Card>
+  );
+}
+
+function TeamTimesheetsTab() {
+  const [date, setDate] = useState(todayISO());
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [busyId, setBusyId] = useState(null);
+
+  async function load() {
+    setLoading(true);
+    setError("");
+    try {
+      const { data } = await api.get("/attendance/team-status", { params: { date } });
+      setRows(data.rows || []);
+    } catch (err) {
+      setError(err?.response?.data?.message || "Could not load team status.");
+    } finally {
+      setLoading(false);
+    }
+  }
+  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [date]);
+
+  async function reopen(row) {
+    setBusyId(row.userId);
+    setNotice("");
+    setError("");
+    try {
+      await api.post(`/timesheets/${row.timesheetId}/reopen`);
+      setNotice(`${row.name}'s timesheet reopened for editing.`);
+      load();
+    } catch (err) {
+      setError(err?.response?.data?.message || "Could not reopen timesheet.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-3">
+        <input type="date" className={inputCls + " w-auto"} value={date} max={todayISO()} onChange={(e)=>setDate(e.target.value)}/>
+      </div>
+      {error && <div className="text-sm text-rose-300 mb-3">{error}</div>}
+      {notice && <div className="text-sm text-lime-300 mb-3">{notice}</div>}
+      <Card className="p-2">
+        {loading ? (
+          <div className="p-4 text-sm text-zinc-500">Loading…</div>
+        ) : !rows.length ? (
+          <div className="p-4 text-sm text-zinc-500">No teammates found for your scope.</div>
+        ) : (
+          <Table columns={["Name","Clocked Out","Timesheet","Hours Logged","Action"]} rows={rows.map((r) => (
+            <tr key={r.userId}>
+              <Td>{r.name}</Td>
+              <Td>{r.clockOut ? `✅ ${fmtTime(r.clockOut)}` : r.clockIn ? "🟡 Still in" : "❌ Not yet"}</Td>
+              <Td>
+                {r.timesheetSubmitted
+                  ? <Badge tone={r.timesheetLate ? "amber" : "lime"}>{r.timesheetLate ? "Late" : "Submitted"}</Badge>
+                  : <Badge tone="rose">Pending</Badge>}
+              </Td>
+              <Td>{r.totalHours ? `${r.totalHours}h` : "—"}</Td>
+              <Td>
+                {r.timesheetSubmitted ? (
+                  <Btn size="sm" variant="secondary" disabled={busyId===r.userId} onClick={()=>reopen(r)}>
+                    {busyId===r.userId ? "…" : "Reopen"}
+                  </Btn>
+                ) : <span className="text-xs text-zinc-600">—</span>}
+              </Td>
+            </tr>
+          ))}/>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+function AttendanceCalendarTab() {
+  const [month, setMonth] = useState(todayISO().slice(0,7));
+  const [records, setRecords] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  async function load() {
+    setLoading(true);
+    setError("");
+    try {
+      const { data } = await api.get("/attendance/calendar", { params: { month } });
+      setRecords(data || []);
+    } catch (err) {
+      setError(err?.response?.data?.message || "Could not load calendar.");
+    } finally {
+      setLoading(false);
+    }
+  }
+  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [month]);
+
+  const byDay = useMemo(() => {
+    const m = new Map();
+    records.forEach((r) => m.set(r.date, r));
+    return m;
+  }, [records]);
+
+  const [y, mo] = month.split("-").map(Number);
+  const daysInMonth = new Date(y, mo, 0).getDate();
+  const firstWeekday = (new Date(y, mo - 1, 1).getDay() + 6) % 7; // Mon=0
+
+  const counts = { Present: 0, Late: 0, Absent: 0, "Half-day": 0 };
+  records.forEach((r) => { if (counts[r.status] !== undefined) counts[r.status]++; });
+
+  const toneFor = { Present: "bg-zinc-800/60 text-zinc-400", Late: "bg-amber-500/20 text-amber-300", Absent: "bg-rose-500/20 text-rose-300", "Half-day": "bg-violet-500/20 text-violet-300", "On Leave": "bg-lime-300/10 text-lime-300" };
+
+  return (
+    <Card className="p-4">
+      <div className="flex items-center justify-between mb-3">
+        <input type="month" className={inputCls + " w-auto"} value={month} onChange={(e)=>setMonth(e.target.value)}/>
+      </div>
+      {error && <div className="text-sm text-rose-300 mb-3">{error}</div>}
+      {loading ? <div className="text-sm text-zinc-500">Loading…</div> : (
+        <>
+          <div className="grid grid-cols-7 gap-1 text-center text-xs text-zinc-500 mb-2">{["Mo","Tu","We","Th","Fr","Sa","Su"].map(d=><div key={d}>{d}</div>)}</div>
+          <div className="grid grid-cols-7 gap-1">
+            {Array.from({length: firstWeekday}).map((_,i)=><div key={"pad"+i}/>)}
+            {Array.from({length: daysInMonth}).map((_,i)=>{
+              const day = i+1;
+              const dateStr = `${month}-${String(day).padStart(2,"0")}`;
+              const rec = byDay.get(dateStr);
+              const tone = rec ? (toneFor[rec.status] || toneFor.Present) : "bg-zinc-900 text-zinc-700";
+              return <div key={day} className={`h-9 rounded flex items-center justify-center text-xs ${tone}`} title={rec?.status || ""}>{day}</div>;
+            })}
+          </div>
+          <div className="flex gap-4 text-xs text-zinc-500 mt-3">
+            Present: {counts.Present} &nbsp;Late: {counts.Late} &nbsp;Absent: {counts.Absent} &nbsp;Half-day: {counts["Half-day"]}
+          </div>
+        </>
+      )}
+    </Card>
+  );
+}
+
+function AttendanceScreen({ role, goto }) {
   const [tab, setTab] = useState("Clock In/Out");
   const isManager = ["Founder","HR","Dept Head","Team Lead","Super Admin"].includes(role);
   return (
     <div>
       <SectionHeader title="Attendance (HRMS)"/>
       <Tabs tabs={isManager ? ["Clock In/Out","Team Timesheets","Calendar","Rules & Analytics"] : ["Clock In/Out","Calendar"]} active={tab} onChange={setTab}/>
-      {tab==="Clock In/Out" && (
-        <Card className="p-5 max-w-sm">
-          <div className="text-xs text-zinc-500 mb-1">Today, 13 Jul 2026</div>
-          <div className="text-xs text-zinc-500 mb-4">Office Hours: 10:00 AM – 7:00 PM</div>
-          <Btn className="w-full justify-center mb-3">Clock In</Btn>
-          <div className="flex items-center gap-2 text-xs text-zinc-500"><Circle size={8} className="text-lime-300 fill-current"/> Office Wi-Fi detected</div>
-        </Card>
-      )}
-      {tab==="Team Timesheets" && (
-        <Card className="p-2">
-          <Table columns={["Name","Clocked Out","Timesheet","Hours Logged","Action"]} rows={[
-            <tr key="1"><Td>Riya Sharma</Td><Td>✅ 7:04 PM</Td><Td><Badge tone="lime">Submitted</Badge></Td><Td>8.0h</Td><Td><Btn size="sm" variant="secondary">View</Btn></Td></tr>,
-            <tr key="2"><Td>Karan Mehta</Td><Td>❌ Not yet</Td><Td><Badge tone="rose">Pending</Badge></Td><Td>—</Td><Td><Btn size="sm" variant="secondary">Nudge</Btn></Td></tr>,
-          ]}/>
-        </Card>
-      )}
-      {tab==="Calendar" && (
-        <Card className="p-4">
-          <div className="grid grid-cols-7 gap-1 text-center text-xs text-zinc-500 mb-2">{["Mo","Tu","We","Th","Fr","Sa","Su"].map(d=><div key={d}>{d}</div>)}</div>
-          <div className="grid grid-cols-7 gap-1">
-            {Array.from({length:28}).map((_,i)=>{
-              const tone = [6,13,20].includes(i) ? "bg-rose-500/20 text-rose-300" : i%9===0 ? "bg-amber-500/20 text-amber-300" : "bg-zinc-800/60 text-zinc-400";
-              return <div key={i} className={`h-9 rounded flex items-center justify-center text-xs ${tone}`}>{i+1}</div>;
-            })}
-          </div>
-          <div className="flex gap-4 text-xs text-zinc-500 mt-3">Present: 19 &nbsp;Late: 2 &nbsp;Absent: 1 &nbsp;Half-day: 1 &nbsp;Leaves: 3</div>
-        </Card>
-      )}
+      {tab==="Clock In/Out" && <ClockInOutCard goto={goto}/>}
+      {tab==="Team Timesheets" && <TeamTimesheetsTab/>}
+      {tab==="Calendar" && <AttendanceCalendarTab/>}
       {tab==="Rules & Analytics" && (
         <div className="grid md:grid-cols-2 gap-4">
           <Card className="p-4">
@@ -1973,8 +2805,9 @@ function AttendanceScreen({ role }) {
               <div>Grace period: 15 min</div><div>Late marks before Half-day flag: 3</div>
               <div>Geo-fencing: <Badge tone="lime">ON</Badge> (200m radius)</div><div>IP restriction: <Badge tone="zinc">OFF</Badge></div>
             </div>
+            <div className="text-[11px] text-zinc-600 mt-3">Illustrative — the Settings → Attendance Policies module isn't built yet, so these values aren't editable or backend-driven.</div>
           </Card>
-          <StatCard label="Org-wide attendance trend" value="91%" sub="30-day average" tone="lime"/>
+          <StatCard label="Org-wide attendance trend" value="91%" sub="30-day average (illustrative)" tone="lime"/>
         </div>
       )}
     </div>
@@ -2250,15 +3083,15 @@ function AppShell({ onLogout, currentUser }) {
           ) : (
             <>
               {active==="dashboard" && <Dashboard role={role} currentUser={currentUser}/>}
-              {active==="tasks" && <TasksScreen/>}
-              {active==="timesheet" && <TimesheetScreen/>}
+              {active==="tasks" && <TasksScreen currentUser={currentUser}/>}
+              {active==="timesheet" && <TimesheetScreen goto={setActive}/>}
               {active==="dailyreport" && <DailyReportScreen role={role} currentUser={currentUser}/>}
-              {active==="social" && <SocialScreen/>}
+              {active==="social" && <SocialScreen role={role} currentUser={currentUser}/>}
               {active==="leaves" && <LeavesScreen role={role}/>}
               {active==="directory" && <DirectoryScreen role={role}/>}
               {active==="recruitment" && <RecruitmentScreen/>}
               {active==="onboarding" && <OnboardingScreen/>}
-              {active==="attendance" && <AttendanceScreen role={role}/>}
+              {active==="attendance" && <AttendanceScreen role={role} goto={setActive}/>}
               {active==="performance" && <PerformanceScreen/>}
               {active==="payroll" && <PayrollScreen role={role}/>}
               {active==="crm" && <CrmScreen/>}

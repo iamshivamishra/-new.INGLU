@@ -15,6 +15,18 @@ function isManagerRole(role) {
   return MANAGER_ROLES.includes(role);
 }
 
+// Helper to safely parse stringified JSON arrays (e.g. sent via FormData)
+function parseIfNeeded(data) {
+  if (typeof data === "string") {
+    try {
+      return JSON.parse(data);
+    } catch (e) {
+      return [];
+    }
+  }
+  return Array.isArray(data) ? data : [];
+}
+
 // Who a manager is allowed to see reports/status for:
 // - HR / Founder / Super Admin: everyone
 // - Dept Head / Team Lead: their own department (reportingManager isn't
@@ -29,148 +41,180 @@ async function scopedTeamFilter(req) {
 /* ============================== SUBMIT / UPDATE (self) ============================== */
 
 export async function submitReport(req, res) {
-  const date = req.body.date || todayStr();
-  const isBackfill = date < todayStr(); // filing for a past day
-  const now = new Date();
-  const isPastDeadlineToday = date === todayStr() && now.getHours() >= DEADLINE_HOUR;
+  try {
+    const date = req.body.date || todayStr();
+    const isBackfill = date < todayStr(); // filing for a past day
+    const now = new Date();
+    const isPastDeadlineToday = date === todayStr() && now.getHours() >= DEADLINE_HOUR;
 
-  const existing = await DailyReport.findOne({ user: req.user._id, date });
-  if (existing && existing.reviewed) {
-    return res.status(403).json({
-      message: "This report has already been reviewed by your manager and is locked for edits.",
-    });
+    const existing = await DailyReport.findOne({ user: req.user._id, date });
+    if (existing && existing.reviewed) {
+      return res.status(403).json({
+        message: "This report has already been reviewed by your manager and is locked for edits.",
+      });
+    }
+
+    // Safely parse attachments, completedTasks, and pendingTasks
+    const attachments = parseIfNeeded(req.body.attachments);
+    const completedTasks = parseIfNeeded(req.body.completedTasks);
+    const pendingTasks = parseIfNeeded(req.body.pendingTasks);
+
+    const payload = {
+      summary: req.body.summary,
+      completedTasks,
+      pendingTasks,
+      tomorrowPlan: req.body.tomorrowPlan,
+      challenges: req.body.challenges,
+      attachments,
+      user: req.user._id,
+      date,
+      submittedAt: now,
+      late: isBackfill || isPastDeadlineToday,
+    };
+
+    const report = await DailyReport.findOneAndUpdate(
+      { user: req.user._id, date },
+      payload,
+      { new: true, upsert: true, runValidators: true }
+    );
+
+    res.status(201).json(report);
+  } catch (error) {
+    console.error("Error submitting report:", error);
+    res.status(500).json({ message: "Failed to submit report", error: error.message });
   }
-
-  const payload = {
-    summary: req.body.summary,
-    completedTasks: req.body.completedTasks || [],
-    pendingTasks: req.body.pendingTasks || [],
-    tomorrowPlan: req.body.tomorrowPlan,
-    challenges: req.body.challenges,
-    attachments: req.body.attachments || [],
-    user: req.user._id,
-    date,
-    submittedAt: now,
-    late: isBackfill || isPastDeadlineToday,
-  };
-
-  const report = await DailyReport.findOneAndUpdate(
-    { user: req.user._id, date },
-    payload,
-    { new: true, upsert: true, runValidators: true }
-  );
-  res.status(201).json(report);
 }
 
 /* ============================== READ ============================== */
 
 export async function listReports(req, res) {
-  const filter = {};
-  if (req.query.date) filter.date = req.query.date;
-  if (req.query.userId) filter.user = req.query.userId;
+  try {
+    const filter = {};
+    if (req.query.date) filter.date = req.query.date;
+    if (req.query.userId) filter.user = req.query.userId;
 
-  // Non-managers may only ever see their own reports, regardless of what
-  // userId they pass in.
-  if (!isManagerRole(req.user.role)) {
-    filter.user = req.user._id;
+    // Non-managers may only ever see their own reports, regardless of what
+    // userId they pass in.
+    if (!isManagerRole(req.user.role)) {
+      filter.user = req.user._id;
+    }
+
+    const reports = await DailyReport.find(filter)
+      .populate("user", "name employeeId department role")
+      .populate("completedTasks", "title status")
+      .populate("pendingTasks", "title status")
+      .populate("reviewedBy", "name")
+      .sort({ createdAt: -1 });
+
+    res.json(reports);
+  } catch (error) {
+    res.status(500).json({ message: "Error fetching reports", error: error.message });
   }
-
-  const reports = await DailyReport.find(filter)
-    .populate("user", "name employeeId department role")
-    .populate("completedTasks", "title status")
-    .populate("pendingTasks", "title status")
-    .populate("reviewedBy", "name")
-    .sort({ createdAt: -1 });
-  res.json(reports);
 }
 
 export async function getMyToday(req, res) {
-  const date = req.query.date || todayStr();
-  const report = await DailyReport.findOne({ user: req.user._id, date })
-    .populate("completedTasks", "title status")
-    .populate("pendingTasks", "title status");
-  res.json(report || null);
+  try {
+    const date = req.query.date || todayStr();
+    const report = await DailyReport.findOne({ user: req.user._id, date })
+      .populate("completedTasks", "title status")
+      .populate("pendingTasks", "title status");
+
+    res.json(report || null);
+  } catch (error) {
+    res.status(500).json({ message: "Error fetching today's report", error: error.message });
+  }
 }
 
 /* ============================== MANAGER: TEAM STATUS ============================== */
-// Drives the "Manager Review Queue" screen: every teammate, whether they've
-// submitted today's (or a chosen date's) report, and whether it's been reviewed.
 
 export async function teamStatus(req, res) {
-  if (!isManagerRole(req.user.role)) {
-    return res.status(403).json({ message: "Not permitted to view team report status" });
+  try {
+    if (!isManagerRole(req.user.role)) {
+      return res.status(403).json({ message: "Not permitted to view team report status" });
+    }
+    const date = req.query.date || todayStr();
+    const teamFilter = await scopedTeamFilter(req);
+    const teammates = await User.find({ ...teamFilter, status: "Active" }).select(
+      "name employeeId department role"
+    );
+
+    const reports = await DailyReport.find({
+      date,
+      user: { $in: teammates.map((t) => t._id) },
+    });
+    const byUser = new Map(reports.map((r) => [String(r.user), r]));
+
+    const rows = teammates.map((t) => {
+      const r = byUser.get(String(t._id));
+      return {
+        userId: t._id,
+        name: t.name,
+        employeeId: t.employeeId,
+        department: t.department,
+        submitted: !!r,
+        reportId: r?._id || null,
+        submittedAt: r?.submittedAt || null,
+        late: r?.late || false,
+        reviewed: r?.reviewed || false,
+      };
+    });
+
+    res.json({ date, rows });
+  } catch (error) {
+    res.status(500).json({ message: "Error fetching team status", error: error.message });
   }
-  const date = req.query.date || todayStr();
-  const teamFilter = await scopedTeamFilter(req);
-  const teammates = await User.find({ ...teamFilter, status: "Active" }).select(
-    "name employeeId department role"
-  );
-
-  const reports = await DailyReport.find({
-    date,
-    user: { $in: teammates.map((t) => t._id) },
-  });
-  const byUser = new Map(reports.map((r) => [String(r.user), r]));
-
-  const rows = teammates.map((t) => {
-    const r = byUser.get(String(t._id));
-    return {
-      userId: t._id,
-      name: t.name,
-      employeeId: t.employeeId,
-      department: t.department,
-      submitted: !!r,
-      reportId: r?._id || null,
-      submittedAt: r?.submittedAt || null,
-      late: r?.late || false,
-      reviewed: r?.reviewed || false,
-    };
-  });
-
-  res.json({ date, rows });
 }
 
 /* ============================== MANAGER: REVIEW ============================== */
 
 export async function reviewReport(req, res) {
-  if (!isManagerRole(req.user.role)) {
-    return res.status(403).json({ message: "Not permitted to review reports" });
+  try {
+    if (!isManagerRole(req.user.role)) {
+      return res.status(403).json({ message: "Not permitted to review reports" });
+    }
+    const report = await DailyReport.findByIdAndUpdate(
+      req.params.id,
+      {
+        reviewed: true,
+        reviewedBy: req.user._id,
+        reviewedAt: new Date(),
+        ...(req.body.managerComments !== undefined ? { managerComments: req.body.managerComments } : {}),
+      },
+      { new: true }
+    )
+      .populate("user", "name employeeId department")
+      .populate("completedTasks", "title status")
+      .populate("pendingTasks", "title status");
+
+    if (!report) return res.status(404).json({ message: "Not found" });
+    res.json(report);
+  } catch (error) {
+    res.status(500).json({ message: "Error reviewing report", error: error.message });
   }
-  const report = await DailyReport.findByIdAndUpdate(
-    req.params.id,
-    {
-      reviewed: true,
-      reviewedBy: req.user._id,
-      reviewedAt: new Date(),
-      ...(req.body.managerComments !== undefined ? { managerComments: req.body.managerComments } : {}),
-    },
-    { new: true }
-  )
-    .populate("user", "name employeeId department")
-    .populate("completedTasks", "title status")
-    .populate("pendingTasks", "title status");
-  if (!report) return res.status(404).json({ message: "Not found" });
-  res.json(report);
 }
 
 /* ============================== MANAGER: NUDGE (manual reminder) ============================== */
 
 export async function nudge(req, res) {
-  if (!isManagerRole(req.user.role)) {
-    return res.status(403).json({ message: "Not permitted to send reminders" });
-  }
-  const user = await User.findById(req.params.userId);
-  if (!user) return res.status(404).json({ message: "Employee not found" });
+  try {
+    if (!isManagerRole(req.user.role)) {
+      return res.status(403).json({ message: "Not permitted to send reminders" });
+    }
+    const user = await User.findById(req.params.userId);
+    if (!user) return res.status(404).json({ message: "Employee not found" });
 
-  const date = req.body.date || todayStr();
-  const existing = await DailyReport.findOne({ user: user._id, date });
-  if (existing) {
-    return res.status(400).json({ message: `${user.name} has already submitted today's report.` });
-  }
+    const date = req.body.date || todayStr();
+    const existing = await DailyReport.findOne({ user: user._id, date });
+    if (existing) {
+      return res.status(400).json({ message: `${user.name} has already submitted today's report.` });
+    }
 
-  const sent = await sendReportReminderEmail({ to: user.email, name: user.name });
-  if (!sent) {
-    console.log(`[REMINDER] Daily report nudge for ${user.name} (${user.email}) — SMTP not configured, logging only.`);
+    const sent = await sendReportReminderEmail({ to: user.email, name: user.name });
+    if (!sent) {
+      console.log(`[REMINDER] Daily report nudge for ${user.name} (${user.email}) — SMTP not configured, logging only.`);
+    }
+    res.json({ message: `Reminder sent to ${user.name}.` });
+  } catch (error) {
+    res.status(500).json({ message: "Error sending nudge", error: error.message });
   }
-  res.json({ message: `Reminder sent to ${user.name}.` });
 }
