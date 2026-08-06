@@ -1,11 +1,12 @@
 import Attendance from "../models/Attendance.js";
 import Timesheet from "../models/Timesheet.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
 
 function todayStr() {
   return new Date().toISOString().slice(0, 10);
 }
 
-export async function clockIn(req, res) {
+export const clockIn = asyncHandler(async function clockIn(req, res) {
   const date = todayStr();
   let att = await Attendance.findOne({ user: req.user._id, date });
   if (att && att.clockIn) return res.status(400).json({ message: "Already clocked in today" });
@@ -22,9 +23,9 @@ export async function clockIn(req, res) {
     await att.save();
   }
   res.json(att);
-}
+});
 
-export async function clockOut(req, res) {
+export const clockOut = asyncHandler(async function clockOut(req, res) {
   const date = todayStr();
   const att = await Attendance.findOne({ user: req.user._id, date });
   if (!att || !att.clockIn) return res.status(400).json({ message: "You have not clocked in today" });
@@ -42,26 +43,26 @@ export async function clockOut(req, res) {
   att.clockOut = new Date();
   await att.save();
   res.json(att);
-}
+});
 
-export async function todayStatus(req, res) {
+export const todayStatus = asyncHandler(async function todayStatus(req, res) {
   const date = todayStr();
   const att = await Attendance.findOne({ user: req.user._id, date });
   const ts = await Timesheet.findOne({ user: req.user._id, date });
   res.json({ attendance: att, timesheetSubmitted: !!(ts && ts.submitted) });
-}
+});
 
-export async function calendar(req, res) {
+export const calendar = asyncHandler(async function calendar(req, res) {
   const { userId, month } = req.query; // month = "2026-07"
   const uid = userId || req.user._id;
   const regex = new RegExp(`^${month || todayStr().slice(0, 7)}`);
   const records = await Attendance.find({ user: uid, date: { $regex: regex } });
   res.json(records);
-}
+});
 
-export async function teamStatus(req, res) {
+export const teamStatus = asyncHandler(async function teamStatus(req, res) {
   // For managers: all attendance for today across users they can see (frontend passes explicit user ids or dept scope is applied by role in real deployment)
   const date = req.query.date || todayStr();
   const records = await Attendance.find({ date }).populate("user", "name employeeId department");
   res.json(records);
-}
+});
